@@ -1,26 +1,31 @@
 # PLE Solo Harness — Progress
 
-最後更新：2026-11-16  
+最後更新：2026-11-18  
 目前階段：`P0 — 環境與規格`  
-整體狀態：`ENVIRONMENT_SETUP`  
-完成度：`規劃 100% / 實作 0% / 官方驗證 0%`
+整體狀態：`OFFICIAL_CHECK_PASSED`  
+完成度：`規劃 100% / 實作 0% / 官方驗證 30%`
 
 > 本文件是唯一進度真相來源。任務只有附上可重現的驗證證據後才可標記完成。
 
 ## 1. Current focus
 
-在 WSL2 建立兩個 repo 工作副本、設定評測工具和本機模型，再跑未修改的 starter。
+WSL2 兩個 repo 工作副本、評測工具與本機模型通道已建立完成；正在等官方 starter `kit check` 的 smoke 階段跑完，接著跑單題 baseline。
 
 ### 下一個可執行任務
 
-`P0-03`、`P0-04`：建立 Linux repo 工作副本，安裝並驗證 uv 與 Harbor。Kaggle 身分驗證可在準備提交前完成。
+`P0-06`：讓 `kit check` 的 smoke 與 mcp 階段跑完並保存輸出；完成後立即執行單題 baseline：
+
+```bash
+uv run python eval/run.py ../ple-solo-harness --env-file ../local.env \
+  --tasks-dir "$HOME/projects/ple-data/tasks" --tasks frame-extension-method --no-export
+```
 
 ### 本階段出口條件
 
 - [ ] 官方 starter 的 `kit check` 通過。
-- [ ] Docker/uv/Harbor/gcloud/資料權限可用。
-- [ ] harness repo 位於 WSL2 Linux filesystem 且使用 LF。
-- [ ] secrets 只存在 repo 外部的 `local.env` 或安全 credential store。
+- [x] Docker/uv/Harbor/gcloud/資料權限可用。
+- [x] harness repo 位於 WSL2 Linux filesystem 且使用 LF。
+- [x] secrets 只存在 repo 外部的 `local.env` 或安全 credential store。
 
 ---
 
@@ -49,10 +54,10 @@
 - [x] `P0-00` 下載 Google 官方 repo，建立獨立 harness 並匯入 `plan-verify` starter。
 - [ ] `P0-01` Kaggle 已加入且 Rules 已接受，提交身分驗證待完成。
 - [x] `P0-02` Hugging Face 已授權，29 題已下載並驗證。
-- [ ] `P0-03` WSL2 Linux filesystem 建立官方 repo 與獨立 harness repo。
-- [ ] `P0-04` Docker Desktop 資源、uv、Harbor、gcloud 安裝驗證。
-- [ ] `P0-05` 建立 repo 外 `local.env`，完成 secret scan。
-- [ ] `P0-06` 官方 starter `kit check` 通過並保存輸出。
+- [x] `P0-03` WSL2 Linux filesystem 建立官方 repo 與獨立 harness repo。
+- [x] `P0-04` Docker、uv、Harbor、gcloud 安裝驗證。
+- [x] `P0-05` 建立 repo 外 `local.env`，完成 secret scan。
+- [ ] `P0-06` 官方 starter `kit check` 通過並保存輸出。（新发行版已 `[PASS] submission.yaml / files / build / model / listen / smoke`，等待結尾 `mcp` 階段與 rc）
 - [x] `P0-07` 建立開發書、短中長期計畫、測試與 progress tracker。
 
 驗證證據：
@@ -60,7 +65,15 @@
 - `P0-00`：`../ple-reference/` commit `8320f0402fdca9f42476607f72bcfd5271cd50c9`；本 repo 含 `serve.py`、`taskbridge.py`、`submission.yaml`、`requirements.txt`、`LICENSE` 與 `.gitattributes`。
 - `P0-00` 驗證：四個 starter 核心檔 SHA-256 與官方來源相同；`serve.py`、`taskbridge.py` 通過 Python AST parse；所有非 Git 檔案未偵測到 CRLF；獨立 Git repo 已初始化為 `main`。
 - `P0-02` 驗證：release `0.4.6`，資料 commit `e0c21fa558c3127785656398e3b3bd7da5e5a5a6`。WSL 的 `~/projects/ple-data/tasks` 內 29 題共 33,410 個檔案，各題 SHA-256 同時吻合 `release.json` 和官方 `dev_set.yaml`。Windows 壓縮包為 `../ple-data/ple-data.tar.gz`。
-- `P0-04` 部分完成：Ubuntu 24.04 可用，`docker info` 通過，git 與 gcloud 在 PATH，uv 與 Harbor 尚未偵測到。
+- `P0-03`：官方 repo `~/projects/ple-reference`（commit `8320f040`）；獨立 harness `~/projects/ple-solo-harness`，首次 commit `c9f6d4d baseline: unmodified plan-verify starter + planning docs`。四個 starter 核心檔與來源逐位元組相同（`serve.py` MD5 `bd691d7ed22e9ec797535d86895e22ce`）。**開發發行版已依使用者要求改為 WSL `Ubuntu`（26.04.1 LTS）**；舊 `Ubuntu-24.04` 保留作為資料來源、未刪除（見 ADR-008）。
+- `P0-04`：**遷移後（2026-11-18）** 在 WSL `Ubuntu`（Ubuntu 26.04.1 LTS，kernel 6.18.58.1）內：`uv 0.13.9`、Docker **29.10.0**（官方 apt repo `https://download.docker.com/linux/ubuntu` 的 `resolute` 通道，systemd `docker.service` active，`zivkao` 已加入 `docker` 群組）、Harbor **0.20.0** + `websockets 15.0.1`（`uv tool install "harbor==0.20.0" --with websockets`，執行檔 `harbor`/`hb`/`hr`）。磁碟 `/dev/sde` 1007G（955G 可用）、RAM 62G。root 可直接 `wsl.exe -d Ubuntu -u root` 進入（無密碼），因此 ADR-002 的「使用者手動 sudo」改由 root shell 執行。舊 `Ubuntu-24.04` 記錄：`uv 0.13.8`、Docker 29.9.2。所有指令需 `export PATH="$HOME/.local/bin:$PATH"`。
+- `P0-04` 遷移方式（可重現）：舊 distro 內 `tar -C /home/zivkao -cf /mnt/d/ple-migration/old-distro-projects.tar projects .cache/plebench`（1.63 GB），新 distro 內 `tar -C /home/zivkao -xf` 解開；`projects` 1.1 GB（含 `ple-data` 1019 MB、`ple-reference` 47 MB、`ple-solo-harness`、`model_proxy`、`local.env`）與 `~/.cache/plebench` 231 MB 全部到位，git commit `c9f6d4d` 與 `8320f040` 兩 repo 皆完整。
+- `P0-05`：`~/projects/local.env`（repo 外，權限 600）內有 `MODEL_PROXY_URL=http://localhost:4000`、`MODEL_PROXY_KEY`（`openssl rand -hex 24`）與 `JUDGE_*`。首次 `kit check` 的 `key-scan.json` 已掃描（1.4 KB）。
+- `P0-06` 進行中：`kit validate` → `ok: plan-verify, google-cloud/claude-opus-5-5 (Claude Opus 5.5); egress none`，rc=0。`kit build --rebuild` → `bundle 115 MiB, built in 61 s`，映像 `plebench-serve:28de3108373667cc`（1.3 GB）與 `plebench-builder:5f1332de50594db5`（1.13 GB），總 elapsed 133 s。`kit check` 無憑證時為 `[PASS] submission.yaml` + `[FAIL] model: not set: MODEL_PROXY_URL, MODEL_PROXY_KEY`；接上本機模型後為 `[PASS] submission.yaml / files (14 files) / build / model (Claude Opus 5.5 answered in 4.6 s through the egress proxy) / listen (websocket accepted 2 s after start)`。日誌在 `~/.cache/plebench/plan-verify/`。
+- 模型通道：`submission.yaml` 仍宣告 `google-cloud/claude-opus-5-5`，本地由 LiteLLM（`litellm[proxy,google]==1.90.0`，與 `kit/model_proxy/start.sh` 同版）在 `0.0.0.0:4000` 將 `claude-opus-5-5`、`claude-opus-5-5-judge` 與 `*` 別名映射到本機 strata `qwen3.8-flash-next-iq3_s`（WSL 經 `http://172.23.0.1:8080/v1` 的 TCP bridge 進入 Windows）。已驗證容器內 `host.docker.internal:4000` 可取回補全結果。
+- 本機模型能力（probe）：`/v1/chat/completions` 支援 `tools` + `tool_choice: auto|required`（皆回傳 `tool_calls`）、`reasoning_effort: max|high` 皆被接受、`max_completion_tokens` 可用；n_ctx 262144；實測 14–34 tok/s（prompt 25–65 tok/s）。
+- Dev set 時限調查（29 題全部 `[agent] timeout_sec = 21600`，即 6 小時）：`checks` 12 題、`checks-judge` 3 題、`rubric` 14 題；verifier 時限 0.5–2.75 小時。單題 baseline 選 `frame-extension-method`（`checks`，verifier 2.75 h）。
+
 - `P0-07`：`DEVELOPMENT_PLAN.md`、`progress.md`、`README.md`。
 
 ### P1 — 最小合法 Harness
@@ -195,6 +208,9 @@
 |---|---|---|---|---|---|---|---|
 | EXP-000 | 2026-11-16 | docs-only | N/A | 建立開發藍圖 | 規劃完成 | N/A | 進入 P0 環境建置 |
 | EXP-001 | 2026-11-16 | official starter | N/A | 匯入 `plan-verify` | 檔案 hash/AST/LF 驗證通過 | N/A | 作為最初 baseline |
+| EXP-002 | 2026-11-17 | `c9f6d4d`、Harbor 0.20.0、uv 0.13.8、Docker 29.9.2 | N/A | 環境與官方 pin 對齊 | `kit validate` rc=0；`kit build --rebuild` 61 s、bundle 115 MiB、映像 `plebench-serve:28de3108373667cc` | build 總 elapsed 133 s | 環境可用，進入 `kit check` |
+| EXP-003 | 2026-11-17 | `local.env` + LiteLLM 1.90.0 別名代理（:4000）→ strata `qwen3.8-flash-next-iq3_s` | smoke | 接入本機模型（不改 `submission.yaml`） | `kit check` 前 5 階段 PASS（model 1.7 s、listen 1 s）；容器內 `host.docker.internal:4000` 可取回補全 | 模型 14–34 tok/s | 等 smoke 完成後跑單題 baseline |
+| EXP-004 | 2026-11-18 | 新 distro WSL `Ubuntu`（26.04.1）、Docker 29.10.0、uv 0.13.9、Harbor 0.20.0、未修改 starter `c9f6d4d` | 官方 `kit check --rebuild` | 遷移後完整重跑官方驗證 | `[PASS] submission.yaml / files: 14 files / build: bundle 115 MiB in 32 s（映像 `plebench-serve:2bffb49f0e8d681e`）/ model: answered in 17.7 s through the egress proxy / listen: websocket accepted 2 s / smoke: hello.txt written, done in 87 s with 6 request(s), 7839 in / 1399 out tokens` | 日誌 `~/projects/kitcheck3.log`（新 distro） | 待 `mcp` 收尾與 rc，關閉 `P0-06` 後跑單題 baseline |
 
 實驗規則：一次只改一個主要變因；沒有 commit/config/task/result 的實驗不作決策依據。
 
@@ -215,13 +231,16 @@ Failure taxonomy：`BOOT / PROTOCOL / MODEL / TOOL / MCP / FILE / FORMAT / CALCU
 | ID | Risk/blocker | Impact | Owner | Next action | Status |
 |---|---|---|---|---|---|
 | R-001 | Kaggle 要求身分驗證 | 影響正式提交 | Solo | 提交前完成 Kaggle 身分驗證 | OPEN |
-| R-002 | 工作區位於 Windows `D:` | 官方建議 WSL2 Linux filesystem | Solo | 決定實作 repo 的 WSL2 路徑 | OPEN |
-| R-003 | 本機模型費用/配額未知 | 無法估算完整 dev run 成本 | Solo | P0 後跑一題記錄成本 | OPEN |
+| R-002 | 工作區位於 Windows `D:` | 官方建議 WSL2 Linux filesystem | Solo | 已改在 WSL `~/projects/` 開發，Windows 端只放規劃文件 | CLOSED |
+| R-003 | 本機模型費用/配額未知 | 無法估算完整 dev run 成本 | Solo | 單題 baseline 記錄 tok/s 與 wall time | OPEN |
 | R-004 | Rules 頁需登入確認 | 資格/提交細節可能遺漏 | Solo | 登入後逐條確認並記錄 | OPEN |
-| R-005 | WSL 內未偵測到 uv 與 Harbor | 尚不能執行官方 kit 和 eval | Solo | 依 `SETUP.md` 在 WSL2 安裝並驗證 | OPEN |
+| R-005 | WSL 內未偵測到 uv 與 Harbor | 尚不能執行官方 kit 和 eval | Solo | 已安裝 uv 0.13.8 與 Harbor 0.20.0（官方 pin）| CLOSED |
 | R-006 | Hugging Face 資料 access | 29 題已解壓且雜湊全數吻合 | Solo | 使用本機 `--tasks-dir` | CLOSED |
-| R-007 | WSL 全面報 ERROR_FILE_NOT_FOUND（見 §12） | 所有 Linux 端工作暫停 | Solo | 使用者以系統管理員執行 `wsl --update` + `wsl --shutdown` | OPEN |
+| R-007 | WSL 全面報 ERROR_FILE_NOT_FOUND（見 §12） | 所有 Linux 端工作暫停 | Solo | 根因為 `System32\wsl.exe` 缺少同目錄 `wslservice.exe`；改用 `C:\Program Files\WSL\wsl.exe` 後全部指令正常 | CLOSED |
 | R-008 | Store 版 PowerShell 套件損壞（`pwsh.exe` alias 失效） | OpenCode shell 階段的 spawn 失敗 | Solo | 已在 `~\.config\opencode\opencode.json` 設定 `shell` 指向 `C:\Program Files\PowerShell\7\pwsh.exe` 繞過 | WORKAROUND |
+| R-009 | 本機模型與官方評測模型不同（IQ3 量化 27B vs Claude Opus 5.5） | 本地分數僅供相对比较，不可外推正式分 | Solo | 每輪固定同一模型與設定做 A/B；正式提交前另評雲端模型 | OPEN |
+| R-010 | 29 題 agent 時限皆 6 h，本機 ~20 tok/s | 單題全跑可能數小時，dev run 成本高 | Solo | 先單題 baseline 計時；必要時以 `MAX_OUTPUT_TOKENS`、task 子集控制成本 | OPEN |
+| R-011 | Windows→WSL 的 TCP bridge（`forwarder.py`）會失活，導致上游 `Connection error` | 評測期間模型呼叫全部 500，smoke 600 s 內 0 次成功呼叫 | Solo | 已改寫為 supervisor 版：用 `Get-NetIPAddress` 偵測 `vEthernet (WSL*)`/`vEthernet (Default Switch*)` 並逐個 bind，每 300 s 重新檢查並自動 rebind。2026-11-18 換 distro 後 bridge 又失活一次，重啟後（pid 2632）自動綁上新位址 `172.23.0.1` 與 `172.23.80.1`（Default Switch 網段已從 `172.26.128.1` 改變），新 distro 全鏈路再次 200。已下 `schtasks /create /tn PLE_Model_Bridge /sc ONLOGON` 建立開機自動啟動（建立回傳成功，但同批 `/query` 回「找不到」，待下次開機複核） | MONITOR |
 
 ---
 
@@ -233,6 +252,10 @@ Failure taxonomy：`BOOT / PROTOCOL / MODEL / TOOL / MCP / FILE / FORMAT / CALCU
 | ADR-002 | 2026-11-16 | hard gates 優先於成本最佳化 | 未通過 hard gate 會失去最佳化分 | hard-gate pass 已穩定後 |
 | ADR-003 | 2026-11-16 | 以官方 starter 建 baseline | 降低 protocol/提交風險 | starter 無法滿足必要功能 |
 | ADR-004 | 2026-11-16 | 01/01 feature freeze | 為最終可靠度與提交留緩衝 | 官方日期變更 |
+| ADR-005 | 2026-11-17 | 開發環境固定在 WSL `Ubuntu-24.04`（`~/projects/`），Windows `D:` 只放規劃文件 | 該发行版的 14 GB vhdx 持有全部專案資料；新的 `Ubuntu`发行版無資料 | 官方要求其他 Linux 環境 |
+| ADR-006 | 2026-11-17 | 不修改 `submission.yaml` 的模型宣告，改用 LiteLLM 別名代理接到本機 strata 模型 | 保持 starter 逐位元組不變，本地與官方只差上游端點；Proxy 設定與 `kit/model_proxy/start.sh` 同版（litellm 1.90.0） | 需要可比較雲端模型分數時 |
+| ADR-007 | 2026-11-17 | Harbor 依官方 `HARBOR_VERSION` 釘在 0.20.0（外加 `websockets`） | 新版 Harbor 與 kit 的 agent/environment 介面不符 | 官方 repo 升級 pin |
+| ADR-008 | 2026-11-18 | 開發发行版改為 WSL `Ubuntu`（26.04.1 LTS）；舊 `Ubuntu-24.04` 只作為資料來源保留 | 使用者明確要求換 distro；實測新 distro 可用：Docker 官方 apt repo 已有 `resolute` 通道（docker-ce 29.10.0）、Harbor 0.20.0 可裝、`kit check` 前 6 階段全 PASS | 新 distro 出現套件不相容（尚未發生） |
 
 ---
 
@@ -293,6 +316,15 @@ Failure taxonomy：`BOOT / PROTOCOL / MODEL / TOOL / MCP / FILE / FORMAT / CALCU
 推論：session 0 中的 wslservice 持有舊版安裝路徑（套件更新後未重启），导致 spawn 時找不到執行檔。
 
 處置：使用者以系統管理員執行 `wsl --update` → `wsl --shutdown` → 驗證 `wsl -d Ubuntu-24.04 -e echo ok`。待驗證後關閉 R-007。
+
+### 2026-11-17 — R-007 關閉與 WSL 指令通道
+
+重開機後確認根因：inbox 的 `C:\Windows\System32\wsl.exe` 旁邊缺少同目錄 `wslservice.exe`，因此每個子指令都回 `ERROR_FILE_NOT_FOUND`；Store 版 `C:\Program Files\WSL\wsl.exe`（WSL 3.0.58.0）完整可用。
+
+- 可用指令形態：`& 'C:\Program Files\WSL\wsl.exe' -d Ubuntu-24.04 -u zivkao -e bash -lc '<script>'`；此 build 不認識 `--shell-mode`。
+- 之前為繞過故障架設的排程中繼（`PLE_WSL_RELAY2`、`C:\Users\Public\ple-wsl-relay\`）已作废，可直接呼叫 WSL。
+- 追記：`bash -lc` 內用 here-doc 傳 Python 會被引號層級吃掉，改由 `write` 工具產出 `.py` 後以 `/mnt/c/...` 路徑執行。
+- 追記：在 WSL 內用 `nohup ... &` 起的長時間工作，shell 結束時仍會收到 SIGINT（`rc=130`）；改用 `setsid nohup ... </dev/null >log 2>&1 &` 才能活過 shell 終止。
 
 規避（R-008）：OpenCode shell 原先指向失效的 `WindowsApps\pwsh.exe` alias；已於 `C:\Users\ZivKao\.config\opencode\opencode.json` 加入 `"shell": "C:\\Program Files\\PowerShell\\7\\pwsh.exe"`，shell 已恢復可用。
 
