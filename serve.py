@@ -25,6 +25,10 @@
 
 The planner and verifier receive only `bash` and `read_file` and are instructed
 not to modify any files.
+
+When the task message names MCP servers, all three roles also receive
+`mcp_list` and `mcp_call`, which reach those servers through the evaluator's
+in-container `http` request ([`docs/protocol.md`](../docs/protocol.md)).
 """
 
 import asyncio
@@ -146,6 +150,27 @@ TOOLS = [
     ),
 ]
 READ_ONLY = TOOLS[:2]
+# Added for every role only when the task's message names MCP servers. A task
+# server's catalog can hold hundreds of tools (~500 KB), so the model
+# discovers tools through `mcp_list` instead of the full catalog being inlined
+# into every model call.
+MCP_TOOLS = [
+    tool(
+        "mcp_list",
+        "List one of this task's MCP servers' tools: their names,"
+        " descriptions and argument schemas. Call it before mcp_call.",
+        server="string",
+    ),
+    tool(
+        "mcp_call",
+        "Run one of this task's MCP servers' tools. `tool` must be a name"
+        " returned by mcp_list and `args_json` a JSON object holding that"
+        " tool's arguments.",
+        server="string",
+        tool="string",
+        args_json="string",
+    ),
+]
 
 
 def clip(text):
@@ -237,9 +262,44 @@ async def run_tool(session, fn):
           f"wrote {await session.write_file(args['path'], args['content'])}"
           f" bytes to {args['path']}"
       )
+    if name == "mcp_list":
+      tools = _mcp_tools.get(args["server"])
+      if tools is None:
+        return f"error: no MCP server named {args['server']}{_known()}"
+      return clip(
+          "\n".join(
+              f"- {t['name']}: {t['description'][:200]} | arguments:"
+              f" {json.dumps(t['inputSchema'], separators=(',', ':'))[:400]}"
+              for t in tools
+          )
+      )
+    if name == "mcp_call":
+      client = _mcp.get(args["server"])
+      if client is None:
+        return f"error: no MCP server named {args['server']}{_known()}"
+      try:
+        tool_args = json.loads(args["args_json"] or "{}")
+      except ValueError as exc:
+        return (
+            f"error: args_json is not a JSON object ({exc}); send the call"
+            " again"
+        )
+      if not isinstance(tool_args, dict):
+        return "error: args_json is not a JSON object; send the call again"
+      return clip(
+          json.dumps(
+              await client.call_tool(args["tool"], tool_args),
+              ensure_ascii=False,
+          )
+      )
     return f"error: there is no tool named {name}"
   # ValueError: content with an unpaired surrogate
-  except (taskbridge.TaskError, KeyError, ValueError) as exc:
+  except (
+      taskbridge.TaskError,
+      taskbridge.MCPError,
+      KeyError,
+      ValueError,
+  ) as exc:
     return f"error: {type(exc).__name__}: {exc}"
 
 
@@ -325,6 +385,44 @@ def conversation(system, session, prompt):
       {"role": "system", "content": system.format(workdir=session.workdir)},
       {"role": "user", "content": prompt},
   ]
+
+
+# MCP clients and tool catalogs for the current task, keyed by server name;
+# filled by setup_mcp and read by run_tool's mcp_list / mcp_call.
+_mcp: dict[str, taskbridge.MCPClient] = {}
+_mcp_tools: dict[str, list[dict]] = {}
+
+
+def _known():
+  """Returns a `, (known: a, b)` suffix listing the connected MCP servers."""
+  return f" (known: {', '.join(_mcp)})" if _mcp else ""
+
+
+async def setup_mcp(session):
+  """Connects to the task's MCP servers and caches their tool catalogs.
+
+  A server that refuses the handshake or paging of its catalog is logged and
+  skipped; its name then stays out of `_mcp`.
+
+  Args:
+    session: Active `taskbridge.Session` for the task.
+  """
+  _mcp.clear()
+  _mcp_tools.clear()
+  for server in session.mcp_servers:
+    name = str(server.get("name") or server.get("url") or "")
+    url = str(server.get("url") or "")
+    if not name or not url:
+      continue
+    try:
+      client = taskbridge.MCPClient(session, url)
+      await client.initialize()
+      tools = await client.list_tools()
+    except (taskbridge.MCPError, taskbridge.TaskError) as exc:
+      await session.log(f"mcp {name}: no tools ({str(exc)[:200]})")
+      continue
+    _mcp[name], _mcp_tools[name] = client, tools
+    await session.log(f"mcp {name}: {len(tools)} tools")
 
 
 async def agent(session, messages, tools, until, final=False):
@@ -471,15 +569,19 @@ async def solve(session):
     return left is None or left - wrap_up >= MIN_STEP_SEC
 
   task = session.instruction
+  await setup_mcp(session)
+  extra = MCP_TOOLS if session.mcp_servers else []
   plan = await agent(
       session,
       conversation(PLANNER, session, task),
-      READ_ONLY,
+      READ_ONLY + extra,
       until(1 - PLAN_SHARE),
   )
   await session.log(f"plan: {plan[:1000]}")
   work = conversation(WORKER, session, f"{task}\n\n## Plan\n{plan}")
-  summary = await agent(session, work, TOOLS, until(CHECK_SHARE), final=True)
+  summary = await agent(
+      session, work, TOOLS + extra, until(CHECK_SHARE), final=True
+  )
   for _ in range(MAX_FIX_ROUNDS):
     if not time_for(until(CHECK_SHARE / 2)):
       break
@@ -490,7 +592,7 @@ async def solve(session):
     verdict = await agent(
         session,
         conversation(VERIFIER, session, review),
-        READ_ONLY,
+        READ_ONLY + extra,
         until(CHECK_SHARE / 2),
     )
     await session.log(f"verifier: {verdict[:1000]}")
@@ -509,7 +611,8 @@ async def solve(session):
         ),
     })
     summary = (
-        await agent(session, work, TOOLS, WRAP_UP_SEC, final=True) or summary
+        await agent(session, work, TOOLS + extra, WRAP_UP_SEC, final=True)
+        or summary
     )
   return summary or session.final_message
 
