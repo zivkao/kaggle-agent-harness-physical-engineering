@@ -2,25 +2,22 @@
 
 最後更新：2026-11-18  
 目前階段：`P0 — 環境與規格`  
-整體狀態：`OFFICIAL_CHECK_PASSED`  
-完成度：`規劃 100% / 實作 0% / 官方驗證 40%`
+整體狀態：`BASELINE_MEASURED`  
+完成度：`規劃 100% / 實作 0% / 官方驗證 50%`
 
 > 本文件是唯一進度真相來源。任務只有附上可重現的驗證證據後才可標記完成。
 
 ## 1. Current focus
 
-開發環境已遷移到 WSL `Ubuntu`（26.04.1 LTS，Docker 29.10.0／uv 0.13.9／Harbor 0.20.0），未修改的官方 `plan-verify` starter 已通過 `kit check`（`rc=0`，6 階段 `[PASS]`，剩 `mcp`／`artifacts` 兩條 WARN）。下一步是跑單題 dev baseline，把 `artifacts/` 建立起來。
+開發環境已遷移到 WSL `Ubuntu`（26.04.1 LTS，Docker 29.10.0／uv 0.13.9／Harbor 0.20.0），未修改的官方 `plan-verify` starter 已通過 `kit check`（`rc=0`），且單題 dev baseline 已完成並取得首個實測分數：**`frame-extension-method` = 0.3617**（14,310 s／題，輸出 326,888 tokens）。下一步進入 P1（處理 `mcp` WARN 與 harness 改進），並評估以付費 API（如 DeepSeek）加速 dev 全量跑。
 
 ### 下一個可執行任務
 
-`P0-08`（進行中）：單題 dev baseline（`frame-extension-method`），同時補上 `artifacts/` 與 R-003／R-010 的實測時間。已於 11:25:56 啟動：
+`P0-08` 已完成（見 EXP-005）。待決策後啟動 P1：
 
-```bash
-cd ~/projects/ple-reference && uv run python eval/run.py ../ple-solo-harness --env-file ../local.env \
-  --tasks-dir "$HOME/projects/ple-data/tasks" --tasks frame-extension-method --no-export
-```
-
-輸出：`~/projects/baseline1.log`、run 目錄 `runs/plan-verify-20261118-112652/`（`attempt1/harbor.log`）。
+1. 處理由 `kit check` `[WARN] mcp` 指向的缺口：starter 未经由 HTTP 使用任務 MCP server（`docs/protocol.md`），held-out 任務可能依賴它。
+2. dev 全量跑的成本決策：本機 strata 29 題約需數天；改用 DeepSeek 等付費 API（flash 單題實估 $0.2–0.4）可多題並行，一晚跑完 29 題，但 `JUDGE_*`／上游切換要在 `model_proxy/config.yaml` 完成，且不影響 `submission.yaml`。
+3. 正式 artifacts 需由宣告模型產生（見 R-012）：提交前要將 proxy 上游換回真的 Vertex `claude-opus-5-5`（目前該 project 的 `aiplatform` API 為 DISABLED，需先開通）。
 
 ### 本階段出口條件
 
@@ -61,7 +58,7 @@ cd ~/projects/ple-reference && uv run python eval/run.py ../ple-solo-harness --e
 - [x] `P0-05` 建立 repo 外 `local.env`，完成 secret scan。
 - [x] `P0-06` 官方 starter `kit check` 通過並保存輸出（`rc=0`，6 階段 `[PASS]`＋2 條 `[WARN]`）。
 - [x] `P0-07` 建立開發書、短中長期計畫、測試與 progress tracker。
-- [ ] `P0-08` 跑單題 dev baseline（`frame-extension-method`），产出 `artifacts/` 並記錄分數、時間與 token。
+- [x] `P0-08` 跑單題 dev baseline（`frame-extension-method`），产出 `artifacts/` 並記錄分數、時間與 token。
 
 驗證證據：
 
@@ -73,6 +70,7 @@ cd ~/projects/ple-reference && uv run python eval/run.py ../ple-solo-harness --e
 - `P0-04` 遷移方式（可重現）：舊 distro 內 `tar -C /home/zivkao -cf /mnt/d/ple-migration/old-distro-projects.tar projects .cache/plebench`（1.63 GB），新 distro 內 `tar -C /home/zivkao -xf` 解開；`projects` 1.1 GB（含 `ple-data` 1019 MB、`ple-reference` 47 MB、`ple-solo-harness`、`model_proxy`、`local.env`）與 `~/.cache/plebench` 231 MB 全部到位，git commit `c9f6d4d` 與 `8320f040` 兩 repo 皆完整。
 - `P0-05`：`~/projects/local.env`（repo 外，權限 600）內有 `MODEL_PROXY_URL=http://localhost:4000`、`MODEL_PROXY_KEY`（`openssl rand -hex 24`）與 `JUDGE_*`。首次 `kit check` 的 `key-scan.json` 已掃描（1.4 KB）。
 - `P0-06` 完成（2026-11-18）：新 distro 內 `uv run --with pyyaml -p 3.12 python -m kit check ../ple-solo-harness --env-file ../local.env --rebuild` → **`rc=0`**，`[PASS] submission.yaml / files: 14 files / build: bundle 115 MiB built in 32 s（映像 `plebench-serve:2bffb49f0e8d681e`）/ model: Claude Opus 5.5 answered in 17.7 s through the egress proxy / listen: websocket accepted 2 s after start / smoke: hello.txt written, done in 87 s with 6 request(s), 7839 in / 1399 out tokens`。兩條 `[WARN]`：`mcp`（harness 未走 HTTP 取回 `/app/mcp.txt`，官方提醒 held-out 任務可能依賴 task MCP server）、`artifacts`（尚未有 dev-set `artifacts/`，需跑 `eval/run.py`）。日誌 `~/projects/kitcheck3.log`，工作目錄 `~/.cache/plebench/plan-verify`。先前在 `Ubuntu-24.04` 的 `kit validate` rc=0 與 `kit build --rebuild`（bundle 115 MiB、61 s、映像 `plebench-serve:28de3108373667cc`）亦保留；兩地映像 tag 不同（`28de…` vs `2bfb…`）來自基礎映像重新解析，不影響 starter 位元組一致性。
+- `P0-08` 完成（2026-11-18）：`uv run python eval/run.py ../ple-solo-harness --env-file ../local.env --tasks-dir "$HOME/projects/ple-data/tasks" --tasks frame-extension-method --no-export` → **score 0.3617，status ok**，`results.json` 記錄 `seconds: 14310`（3 h 58.5 m，agent＋verifier）、tokens `input 34,618,230 / cache 34,076,850（98.4% 命中）/ output 326,888`；proxy 日誌顯示共 **300 次 chat/completions**（平均 122k prompt、1,090 output tokens/次）。產物：run 目錄 `~/projects/ple-reference/runs/plan-verify-20261118-112652/`（`results.json`、`artifacts/frame-extension-method/{final_message.md, files/filesystem/.../output/submission.zip, trajectory.json}`，1.1 MB，1 個 deliverable）。因 `--no-export`，entry 的 `artifacts/` 尚未匯入（決策見 R-012）。
 - 模型通道：`submission.yaml` 仍宣告 `google-cloud/claude-opus-5-5`，本地由 LiteLLM（`litellm[proxy,google]==1.90.0`，與 `kit/model_proxy/start.sh` 同版）在 `0.0.0.0:4000` 將 `claude-opus-5-5`、`claude-opus-5-5-judge` 與 `*` 別名映射到本機 strata `qwen3.8-flash-next-iq3_s`（WSL 經 `http://172.23.0.1:8080/v1` 的 TCP bridge 進入 Windows）。已驗證容器內 `host.docker.internal:4000` 可取回補全結果。
 - 本機模型能力（probe）：`/v1/chat/completions` 支援 `tools` + `tool_choice: auto|required`（皆回傳 `tool_calls`）、`reasoning_effort: max|high` 皆被接受、`max_completion_tokens` 可用；n_ctx 262144；實測 14–34 tok/s（prompt 25–65 tok/s）。
 - Dev set 時限調查（29 題全部 `[agent] timeout_sec = 21600`，即 6 小時）：`checks` 12 題、`checks-judge` 3 題、`rubric` 14 題；verifier 時限 0.5–2.75 小時。單題 baseline 選 `frame-extension-method`（`checks`，verifier 2.75 h）。
@@ -214,7 +212,7 @@ cd ~/projects/ple-reference && uv run python eval/run.py ../ple-solo-harness --e
 | EXP-002 | 2026-11-17 | `c9f6d4d`、Harbor 0.20.0、uv 0.13.8、Docker 29.9.2 | N/A | 環境與官方 pin 對齊 | `kit validate` rc=0；`kit build --rebuild` 61 s、bundle 115 MiB、映像 `plebench-serve:28de3108373667cc` | build 總 elapsed 133 s | 環境可用，進入 `kit check` |
 | EXP-003 | 2026-11-17 | `local.env` + LiteLLM 1.90.0 別名代理（:4000）→ strata `qwen3.8-flash-next-iq3_s` | smoke | 接入本機模型（不改 `submission.yaml`） | `kit check` 前 5 階段 PASS（model 1.7 s、listen 1 s）；容器內 `host.docker.internal:4000` 可取回補全 | 模型 14–34 tok/s | 等 smoke 完成後跑單題 baseline |
 | EXP-004 | 2026-11-18 | 新 distro WSL `Ubuntu`（26.04.1）、Docker 29.10.0、uv 0.13.9、Harbor 0.20.0、未修改 starter `c9f6d4d` | 官方 `kit check --rebuild` | 遷移後完整重跑官方驗證 | `[PASS] submission.yaml / files: 14 files / build: bundle 115 MiB in 32 s（映像 `plebench-serve:2bffb49f0e8d681e`）/ model: answered in 17.7 s through the egress proxy / listen: websocket accepted 2 s / smoke: hello.txt written, done in 87 s with 6 request(s), 7839 in / 1399 out tokens` | 日誌 `~/projects/kitcheck3.log`（新 distro）；另 `[WARN] mcp`（harness 未以 HTTP 取回 `/app/mcp.txt`）、`[WARN] artifacts`（尚無 dev-set artifacts） | **`rc=0`，P0-06 完成**；下一步單題 baseline |
-| EXP-005 | 2026-11-18 | `c9f6d4d`（未修改 starter）、新 distro `Ubuntu`、bridge＋LiteLLM 別名代理 | `frame-extension-method`（checks，agent 21600 s／verifier 9900 s） | 單題 dev baseline，建立 `artifacts/`，量測 R-003／R-010 成本 | 進行中：11:25:56 啟動，`attempt 1: 1 task(s), 1 at a time` | 日誌 `~/projects/baseline1.log`；run `~/projects/ple-reference/runs/plan-verify-20261118-112652/` | 完成後記錄分數、耗時、token 並同步 `artifacts/` |
+| EXP-005 | 2026-11-18 | `c9f6d4d`（未修改 starter）、新 distro `Ubuntu`、bridge＋LiteLLM 別名代理 | `frame-extension-method`（checks，agent 21600 s／verifier 9900 s） | 單題 dev baseline，建立 `artifacts/`，量測 R-003／R-010 成本 | **score 0.3617（`ok`，14,310 s）**；300 次模型呼叫全 200；tokens in 34,618,230／cache 34,076,850／out 326,888；1 個 deliverable（`submission.zip`）＋final message | 全程 3 h 58.5 m；有效 wall 吞吐 22.8 tok/s out；換算 DeepSeek flash＝單題 $0.19（離峰）–0.38（高峰），29 題約 $5–25 | starter 本地基線確立；P1 改進以此 0.3617 為對照 |
 
 實驗規則：一次只改一個主要變因；沒有 commit/config/task/result 的實驗不作決策依據。
 
@@ -236,14 +234,15 @@ Failure taxonomy：`BOOT / PROTOCOL / MODEL / TOOL / MCP / FILE / FORMAT / CALCU
 |---|---|---|---|---|---|
 | R-001 | Kaggle 要求身分驗證 | 影響正式提交 | Solo | 提交前完成 Kaggle 身分驗證 | OPEN |
 | R-002 | 工作區位於 Windows `D:` | 官方建議 WSL2 Linux filesystem | Solo | 已改在 WSL `~/projects/` 開發，Windows 端只放規劃文件 | CLOSED |
-| R-003 | 本機模型費用/配額未知 | 無法估算完整 dev run 成本 | Solo | 單題 baseline 記錄 tok/s 與 wall time | OPEN |
+| R-003 | 本機模型費用/配額未知 | 無法估算完整 dev run 成本 | Solo | 單題 baseline 記錄 tok/s 與 wall time | CLOSED（EXP-005：out 326,888 tok／14,310 s＝22.8 tok/s wall；in 34.6M、cache 命中 98.4%；換算 DeepSeek flash 單題 $0.19–0.38、29 題 $5–25） |
 | R-004 | Rules 頁需登入確認 | 資格/提交細節可能遺漏 | Solo | 登入後逐條確認並記錄 | OPEN |
 | R-005 | WSL 內未偵測到 uv 與 Harbor | 尚不能執行官方 kit 和 eval | Solo | 已安裝 uv 0.13.8 與 Harbor 0.20.0（官方 pin）| CLOSED |
 | R-006 | Hugging Face 資料 access | 29 題已解壓且雜湊全數吻合 | Solo | 使用本機 `--tasks-dir` | CLOSED |
 | R-007 | WSL 全面報 ERROR_FILE_NOT_FOUND（見 §12） | 所有 Linux 端工作暫停 | Solo | 根因為 `System32\wsl.exe` 缺少同目錄 `wslservice.exe`；改用 `C:\Program Files\WSL\wsl.exe` 後全部指令正常 | CLOSED |
 | R-008 | Store 版 PowerShell 套件損壞（`pwsh.exe` alias 失效） | OpenCode shell 階段的 spawn 失敗 | Solo | 已在 `~\.config\opencode\opencode.json` 設定 `shell` 指向 `C:\Program Files\PowerShell\7\pwsh.exe` 繞過 | WORKAROUND |
 | R-009 | 本機模型與官方評測模型不同（IQ3 量化 27B vs Claude Opus 5.5） | 本地分數僅供相对比较，不可外推正式分 | Solo | 每輪固定同一模型與設定做 A/B；正式提交前另評雲端模型 | OPEN |
-| R-010 | 29 題 agent 時限皆 6 h，本機 ~20 tok/s | 單題全跑可能數小時，dev run 成本高 | Solo | 先單題 baseline 計時；必要時以 `MAX_OUTPUT_TOKENS`、task 子集控制成本 | OPEN |
+| R-010 | 29 題 agent 時限皆 6 h，本機 ~20 tok/s | 單題全跑可能數小時，dev run 成本高 | Solo | 實測（EXP-005）：單題 3 h 58.5 m、out 僅 327k tokens → 本機串行 29 題要數天。對策：改接付費 API（DeepSeek flash 併發 2500）可 8–16 題並行、一晚跑完；或 `MAX_OUTPUT_TOKENS`／task 子集控制 | OPEN |
+| R-012 | dev artifacts 由本機 strata（透過 `claude-opus-5-5` 別名）產生，而 entry 宣告模型是 `google-cloud/claude-opus-5-5`；官方規則「Call only the model you declared」 | 若把 strata 產物直接匯入 `artifacts/` 提交，與宣告模型不符，違反 fair-play 且 manifest 記錄 `model_api=claude-opus-5-5` | Solo | 本地 strata 只用於迴圈驗證與 P1 對照（維持 `--no-export`）；產生正式 artifacts 前把 proxy 上游換回真 Vertex（`aiplatform` API 目前 DISABLED，需先開通）後重跑 dev set | OPEN |
 | R-011 | Windows→WSL 的 TCP bridge（`forwarder.py`）會失活，導致上游 `Connection error` | 評測期間模型呼叫全部 500，smoke 600 s 內 0 次成功呼叫 | Solo | 已改寫為 supervisor 版：用 `Get-NetIPAddress` 偵測 `vEthernet (WSL*)`/`vEthernet (Default Switch*)` 並逐個 bind，每 300 s 重新檢查並自動 rebind。2026-11-18 換 distro 後 bridge 又失活一次，重啟後（pid 2632）自動綁上新位址 `172.23.0.1` 與 `172.23.80.1`（Default Switch 網段已從 `172.26.128.1` 改變），新 distro 全鏈路再次 200。排程方案失敗：`schtasks /create`（cmd 與 `Register-ScheduledTask` 兩種）一律回「存取被拒」，代表本機群組原則禁止一般使用者建立排程工作（已確認 `PLE_Model_Bridge` 不存在）。改用等價方案：HKCU 啟動鍵 `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\PLE_Model_Bridge = pwsh -File start-watchdog.ps1`（已寫入並回讀確認），開機後由 `watchdog.ps1`（30 s 巡邏、必要時重啟 `forwarder.py`）負責保活；目前 forwarder pid 2632、watchdog pid 28964 在跑。 | MONITOR |
 
 ---
