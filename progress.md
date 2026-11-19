@@ -1,9 +1,9 @@
 # PLE Solo Harness — Progress
 
-最後更新：2026-11-19  
+最後更新：2026-11-20  
 目前階段：`P1 — 最小合法 Harness（提前開工）`  
-整體狀態：`P1_DEF001_EXP012_STOP_REQUESTS_STEP_SHARE`  
-完成度：`規劃 100% / 實作 5% / 官方驗證 50%`
+整體狀態：`P1_DEF001_EXP013_FIXROUNDS_READ_NOT_WRITE — 待 (c)/(d) 決策`  
+完成度：`規劃 100% / 實作 10% / 官方驗證 55%`
 
 > 本文件是唯一進度真相來源。任務只有附上可重現的驗證證據後才可標記完成。
 
@@ -37,10 +37,15 @@
 
 **2026-11-19（六）：** 選項 (b) 已執行（EXP-012，quick `25e3173`：僅 `QUICK_SEC/REQ/OUT` 三個預設值 1800→3600／40→80／15000→60000，收尾保留、單呼叫上限、gate、prompt、模型、工具全不動）。**仍 0 分，判定落 Rule 4（呼叫數先耗盡）**：`stop=requests, requests=41, output_tokens=45,130`——wall 1,353 s（3600 未盡）、out 45,130（60k 未盡，且 out 能燒到 45k 證明新輸出預算確已生效）；41 « 全域停機線 80−4＝76 ⇒ `stop=requests` 必来自 `serve.py` L581 的步驟級份額（`capped`，「this step ran out of its share of the calls」；另一來源 over_budget 需 ≥76）。模型本輪誠實進展：以 heredoc 分段寫分析腳本（`part2 ok`，exit_code=0），**part3 尚未寫完請求數即盡**，腳本從未執行（`python3 /tmp` 計 0）；wrap 收尾回純文字「Part 3: …」；gate 0 次；`capture files={}`→`ERR_NO_SUBMISSION`。**結論：約束點在 quick 的步驟級配額結構（routing），非全域預算大小；依 Rule 4 本輪不再加碼。**
 
+**2026-11-20（七）：EXP-013（quick v5 同題重測）＋ P1-05／P1-06 實作。**
+- **EXP-013 第一次尝试被 WSL 重啟切斷**（01:22 啟動，~01:47 distro 重啟，trial 執行中、無結果；run dir `plan-verify-20261120-012201` 作廢）。重啟後檢查鏈路：strata `:8080` 200 OK；**LiteLLM `:4000` 未運行**（重啟後未啟動）→ 以 `local.env` 重啟（200 with key；未帶 key 的 500 是 litellm auth 錯誤处理器缺 `prisma` 模組的無害 bug）。v5 mock 先重驗 **9/9**（`quota` case 在）。01:59 同條件重跑（`exp013b.start`）。
+- **EXP-013 結果：仍 0.0／1,583 s**，`stop=requests requests=36 output_tokens=39,705`（in 702,885／cache 648,017）。但轉錄檔 `agent/plan-verify.txt` 顯示 **v5 修復如設計生效**：verifier 兩度 `capped: step spent its 4-call share`（呼叫 22、31）後**不再中斷執行**，兩輪 fix round 都跑了（EXP-012 在這裡就死）；gate 也首次觸發 2/2 次。零分原因變成新的失敗族：**「fix round 只讀不寫」**——verifier 明列「完全沒有交付物，寫這六個檔再 zip」，worker 的 fix round 卻全部花在 `ls`/`find`/`head` 重讀（0 次 write），MAX_FIX_ROUNDS=2 用盡後 `capture files={}`。**配額結構不再是約束點；本模型在此預算下不產出（能力／紀律問題，含 ortools 缺失）。**依 Rule 4：本輪不再改 quick 參數，DEF-001 進入 (c)／(d) 使用者決策。
+- **P1-05／P1-06 實作（main branch `eb918d8`）**：serve.py 加 `phase:` 狀態機日誌標記、`safe()` 對所有 log 幀遮罩 `OPENAI_API_KEY`、`RETRY_WAITS` 可用 `$RETRY_WAITS` 覆蓋（測試縮時）；新增 `tests/mock_contract_test.py` 反向注入契約測試 **10/10**：`clean／fix_round／retry_429／retry_dead（400 不合任何重試規則→有界 error 幀）／timeout_wrap（慢模型 6 s 時鐘→12 s 內 done）／tool_error／context_full（400 溢出→剪舊 tool 結果重試）／cancel（10 s 窗口內 done，final="(stopped: time is up)"）／socket_close（斷線後伺服器存活、接新任務到 done）／redaction（key 藏在錯誤 body 裡，任何 log 幀都不得出現）`。pyflakes 0、AST ok、無新增 >80 char 行。官方 `kit check` 於補丁後重跑（`kitcheck5.log`，見 EXP-014）。
+
 ### 下一個可執行任務
 
-1. **DEF-001 下一步（EXP-012 後，Rule 4 判定）**：選項 (b) 全域預算加檔已被反證——約束點是**步驟級份額**（`serve.py` L581 `capped` 在 41 呼叫即停；caps 結構：plan 8／work `QUICK_REQ−WRAP−RESERVE`／verif 4，另有 fix-round、nudge、wrap、gate 的分支消耗）。下一步（單一變因）：以 mock 定位在 41 觸發的具體份額來源（推測在 work／fix-round 的某一 sub-cap 或 `_reqs` 計入方式），修復後同題重測；或依 ADR-009 改採 **(c)** 快速版只跑輕題／**(d)** 跳 quick 直接 main dev 子集。**禁：同一輪再調高三個全域數字。**
-2. `P1-05`／`P1-06`：deadline 行為（`cancel` 後 10 s 內發 `done`）與 structured logs／unit tests（DEVELOPMENT_PLAN P1 出口條件：注入 model 429/500/timeout、tool error、斷線皆能有界結束）。
+1. **DEF-001 進入決策點（EXP-013 後）**：v5 已修復配額結構（實測證據：capped→fix round 照跑；mock `quota` 9/9 已先預測），但 quick 在此重工程題仍然 0 分，失敗族為「fix round 只讀不寫／模型不產出」。依 ADR-009 revisit trigger，**待使用者選**：**(c)** quick 只跑輕題（先做 dev 29 題的輕重分級）／**(d)** 跳 quick 直接 main dev 子集（完整版單題 3–4 h）。若選 (c)，候選單變因：fix-round 間隙提示後若 `writes==0` 則將 gap verdict 直接轉為「立即寫最小交付」指令（事件式，呼應 v3 gate 邏輯）。
+2. **EXP-014（本輪已跑）**：main 補丁後 `kit check` 全階段結果記入 §6（`~/projects/kitcheck5.log`）。
 2. dev 全量跑的成本決策：本機 strata 29 題約需數天；改用 DeepSeek 等付費 API（flash 單題實估 $0.2–0.4）可多題並行，一晚跑完 29 題，但 `JUDGE_*`／上游切換要在 `model_proxy/config.yaml` 完成，且不影響 `submission.yaml`。
 3. 正式 artifacts 需由宣告模型產生（見 R-012）：提交前要將 proxy 上游換回真的 Vertex `claude-opus-5-5`（目前該 project 的 `aiplatform` API 為 DISABLED，需先開通）。
 
@@ -57,9 +62,9 @@
 
 | 階段 | 日期 | 狀態 | 完成 | 驗證摘要 |
 |---|---|---:|---:|---|
-| P0 環境與規格 | 11/16–11/19 | IN_PROGRESS | 3/8 | 官方 repo、starter、規劃和 29 題已齊；WSL Docker 可用 |
-| P1 最小合法 Harness | 11/20–11/23 | BACKLOG | 0/6 | — |
-| P2 Baseline Agent Loop | 11/24–11/29 | BACKLOG | 0/6 | — |
+| P0 環境與規格 | 11/16–11/19 | **DONE** | 7/8 | 僅 P0-01（Kaggle 身分驗證）未完成，由 R-001 追蹤，不阻擋開發 |
+| P1 最小合法 Harness | 11/20 | **DONE** | 7/7 | contract 注入 10/10（429/500/timeout/tool error/斷線有界；cancel≤8 s）；`kit check` 7 階段全 PASS（EXP-014，映像 `9b27c95b`） |
+| P2 Baseline Agent Loop | 11/24–11/29 | READY | 0/6 | 前置 P1 已 DONE；待 DEF-001 (c)/(d) 決策決定跑法 |
 | P3 工程驗證核心 | 11/30–12/06 | BACKLOG | 0/5 | — |
 | P4 多格式工具能力 | 12/07–12/13 | BACKLOG | 0/5 | — |
 | P5 完整 Dev Set/回歸 | 12/14–12/20 | BACKLOG | 0/6 | — |
@@ -108,8 +113,8 @@
 - [x] `P1-02` WebSocket protocol adapter 與健康啟動。
 - [x] `P1-03` model client、timeout、retry、cache marking。
 - [x] `P1-04` taskbridge tool adapter 與統一錯誤型別。
-- [ ] `P1-05` state machine、deadline、graceful finalize。
-- [ ] `P1-06` structured logs、redaction、unit/contract tests。
+- [x] `P1-05` state machine、deadline、graceful finalize。
+- [x] `P1-06` structured logs、redaction、unit/contract tests。
 - [x] `P1-07` MCP 中繼工具（`mcp_list`／`mcp_call`）通過官方 `kit check` 的 `mcp` 階段。
 
 驗證證據：
@@ -118,6 +123,7 @@
 - `P1-02`：`kit check` `[PASS] listen: websocket accepted 2 s after start`（< 120 s 門檻）。
 - `P1-03`：EXP-005 baseline 實測 34.6M prompt 中 34.1M cache 命中（98.4%，`CACHE_MARK` 生效）；`recover()` 重試邏輯在 3 h 58 m 跑中未觸發致命錯誤（0 errored trials）。
 - `P1-04`／`P1-07`：commit `97cbd38 P1-01: expose task MCP servers to all agent roles via mcp_list/mcp_call meta-tools`（serve.py＋108/−5；pyflakes 0；AST ok；未新增 >80 char 行）。以 `taskbridge.MCPClient` 於任務開始時 `initialize`＋`list_tools` 並快取目錄，模型透過兩個中繼工具按需發現與呼叫（避免 ~500 KB 目錄進 context）；**官方 `kit check` 於 22:3x 完成：`[PASS] mcp: mcp.txt written, done in 82 s with 13 request(s), 13814 in / 1211 out tokens`，`[WARN] mcp` 消除**；全套 `submission.yaml/files/build/model/listen/smoke/mcp` 7 階段全 PASS，只剩 `artifacts` WARN（尚未匯入 dev artifacts，符合 R-012 決策）。新映像 `plebench-serve:b8a6572ec27dd14a`，日誌 `~/projects/kitcheck4.log`。統一錯誤型別：`run_tool` 錯誤路徑含 `TaskError`/`MCPError`/`KeyError`/`ValueError`。
+- `P1-05`／`P1-06`：commit `eb918d8 P1-05/P1-06: phase markers, key redaction, testable retry waits + contract fault-injection suite (10/10)`。DEVELOPMENT_PLAN P1 出口條件全部由 `tests/mock_contract_test.py` 注入驗證（mock model＋fake evaluator，離線）：model 429（SDK 燒盡後 `recover()` 再接手→done）、model 500/400（不合重試規則→有界 `error` 幀，~0 s）、model timeout（慢模型＋6 s 時鐘→6.0 s done）、tool error（exit 1 進入對話、執行不中斷）、斷線（`socket_close` 後伺服器存活並完成新任務）、cancel（**8 s 內**收 `done`，final=`(stopped: time is up)`，符合官方 10 s 窗口）。structured logs：`phase: plan|work|verify N|fix N` 標記狀態機；redaction：`safe()` 將 `$OPENAI_API_KEY` 從所有 log 幀移除（`redaction` 案例：key 藏在 429 錯誤 body 內，断言 log 不含 key、含 `<api-key>`）。`RETRY_WAITS` 可由環境覆蓋以供測試縮時。mock 10/10、pyflakes 0、AST ok。
 
 ### P2 — Baseline Agent Loop
 
@@ -220,9 +226,9 @@
 
 | Suite | Cases | Pass | Fail | Last run | Evidence |
 |---|---:|---:|---:|---|---|
-| Static/lint/type | 3 | 3 | 0 | 2026-11-16 | 官方檔案 SHA-256、Python AST、LF scan 通過 |
-| Unit | 0 | 0 | 0 | — | — |
-| Contract | 0 | 0 | 0 | — | — |
+| Static/lint/type | 3 | 3 | 0 | 2026-11-20 | 官方檔案 SHA-256、Python AST、LF scan；另 pyflakes 0（serve.py＋兩個 mock 測試）於 `eb918d8` |
+| Unit | 9 | 9 | 0 | 2026-11-20 | quick 預算/閘門 mock（`tests/mock_quick_test.py`，quick worktree，含 `quota`） |
+| Contract | 10 | 10 | 0 | 2026-11-20 | `tests/mock_contract_test.py`：429/500/400/timeout/tool error/cancel≤10s/斷線/context 溢出/redaction/狀態機 |
 | Integration | 0 | 0 | 0 | — | — |
 | Functional | 0 | 0 | 0 | — | — |
 | Regression-fast | 0 | 0 | 0 | — | — |
@@ -230,7 +236,7 @@
 | Stress | 0 | 0 | 0 | — | — |
 | Reliability/fault | 0 | 0 | 0 | — | — |
 | Security | 0 | 0 | 0 | — | — |
-| Official kit | 0 | 0 | 0 | — | — |
+| Official kit | 7 | 7 | 0 | 2026-11-20 | `kitcheck5.log`：7 階段全 PASS（`eb918d8`），僅 `artifacts` WARN（R-012） |
 
 ---
 
@@ -249,6 +255,8 @@
 | EXP-010 | 2026-11-19 | `16053ed`（quick v3 交付閘門）、其餘同 EXP-009 | `frame-extension-method` | v3 gate 同題實測重跑（`--no-export`、僅 strata） | **score 0.0／1,534 s**；仍無 submission.zip；`stop=none requests=8 output_tokens=994`；trajectory：4 次帶工具呼叫（12 次唯讀工具）＋4 次**空 content 結束**（994 out 全在 reasoning_content）→ v3 gate 要求 `message.content` 非空、空結束直接落進 nudge 迴圈（1 空＋3 nudge＝8 呼叫吻合），從未觸發 `gate:`；映像 `e729bd25` 確認內含 v3（build 13:25:20 > commit 13:20:32） | run `runs/plan-verify-20261119-132529/` | **v3 不足**：失敗模式再變體為「空字串結束」；v4＝gate 移除 content 非空條件（任何無工具結束且 `_writes==0` 都打回）＋`gate_empty` mock 案例 |
 | EXP-011 | 2026-11-19 | `1ea5c67`（quick v4：任何無工具結束含空 content 皆打回、空 turn 不回放；mock 8/8）、其餘同 EXP-009/010；LiteLLM 於本次重新啟動（見 §1（四）） | `frame-extension-method` | v4 同題實測重跑（使用者同意後；`--no-export`、僅 strata） | **score 0.0／696 s**；`stop=output requests=19 output_tokens=17,931`；**gate 觸發 0 次**（模型不再無工具結束）；第 19 呼叫以 `cat > /tmp/s.py <<PY` 生成完整分析腳本（已是最終交付邏輯）途中被輸出預算截斷、從未執行；`capture.json files={}`→reward 0 | tokens in 377,641／cache 308,932／out 17,931；run `runs/plan-verify-20261119-171551/`；696 s＝完整版 1/20 | **根因①（15k out 預算）主導**：模型誠實工作到燒盡，閘門非失敗點也非救援點；**ADR-009 revisit trigger 成立**→(b)/(c)/(d) 決策 |
 | EXP-012 | 2026-11-19 | `25e3173`（quick v4＋僅預算加檔：`QUICK_SEC 1800→3600`／`QUICK_REQ 40→80`／`QUICK_OUT 15000→60000`；wrap 300/4/4000、單呼叫 2000/180s、gate=2、prompt、模型、工具全不動）、其餘同 EXP-011 | `frame-extension-method` | 選項 (b) 預算加檔同題重測（`--no-export`、僅 strata；與 EXP-011 可比） | **score 0.0／1,353 s**；`stop=requests requests=41 output_tokens=45,130`；wall／out 預算皆未盡（1,353＜3,600；45,130＜60,000，且 out 燒到 45k 證明新檔生效）；41 ≪ 全域停機線 76 ⇒ 觸發自 `serve.py` L581 步驟級份額（`capped`）；模型分段寫腳本誠實進展（`part2 ok` exit 0）、part3 未寫完即停、腳本從未執行；wrap 收尾純文字；gate 0；`capture files={}`→`ERR_NO_SUBMISSION`；無 zip | run `runs/plan-verify-20261119-195835/`；tokens in 1,030,563／cache 969,191／out 45,130；36 步驟 | **判定 Rule 4**：呼叫數先耗盡→約束在步驟級配額（routing）非全域預算；**本輪不再加碼**；下一步＝mock 定位具體份額來源修復後重測，或 (c)／(d) |
+| EXP-014 | 2026-11-20 | main `eb918d8`（P1-05/06：phase 標記、log 遮罩、`$RETRY_WAITS`、mock_contract 10 案例入 repo） | 官方 `kit check` | 補丁後官方驗證（不影響 quick 工作） | **7 階段全 `[PASS]`**：submission.yaml／`files: 15 files`（含 tests）／build 31 s 映像 `plebench-serve:9b27c95b5e3166d0`／model 2.0 s／listen 2 s／smoke 161 s 3 requests／mcp 170 s 7 requests（`secret_word`→`MCP-59BAABCD`）；僅 `[WARN] artifacts`（符合 R-012） | 日誌 `~/projects/kitcheck5.log` | **P1-05/06 官方驗證通過**；kit 以 commit 建置（未 commit 會 `[WARN] files: not committed`）→ 先 commit 再 kit check 的流程確立 |
+| EXP-013 | 2026-11-20 | quick v5 `c476e8c`（out-of-share verifier 空 verdict 不再當 PASS；capped 依名稱入log）、其餘同 EXP-012 | `frame-extension-method` | DEF-001 (a) 單變因修復後同題重測。第一次嘗試（01:22，run `plan-verify-20261120-012201`）被 WSL distro 重啟（~01:47）切斷、無結果；重啟 LiteLLM `:4000`、重驗 mock 9/9 後 01:59 同條件重跑（`exp013b.start`） | **score 0.0／1,583 s**；`stop=requests requests=36 output_tokens=39,705`；**v5 修復生效**：`capped: step spent its 4-call share` 出現兩次（呼叫 22、31）後執行不再終止，兩輪 fix round 照跑（EXP-012 於此死）；gate 首次觸發 2/2；verifier 兩度明列「零交付物，寫六檔再 zip」，**worker fix round 全花在 ls/find/head 重讀、0 次 write**；`capture files={}`→0 | run `runs/plan-verify-20261120-015915/`；in 702,885／cache 648,017／out 39,705；轉錄 `agent/plan-verify.txt`；ortools 缺失（ModuleNotFoundError） | 失敗族再移：「fix round 只讀不寫／模型不產出」；配額結構已非約束點；依 Rule 4 停手，DEF-001 交 (c)／(d) 使用者決策 |
 | EXP-006 | 2026-11-18 | `97cbd38`：serve.py 加 `mcp_list`／`mcp_call` 中繼工具（MCPClient 於 task 開始時 initialize＋list_tools 並快取；planner/worker/verifier 三角色皆可呼叫；輸出 clip、args 以 JSON字串傳遞） | 官方 `kit check`（含 `mcp` 階段） | 讓 harness 正式走協議的 `http` 請求存取任務 MCP server，消除 `[WARN] mcp` | 靜態驗證：AST ok、pyflakes 0、無新增 >80 char 行；**`kit check` 22:3x：`[PASS] mcp`（82 s、13 requests、13,814 in／1,211 out）、6 階段全 PASS、僅剩 `artifacts` WARN**；映像 `plebench-serve:b8a6572ec27dd14a`（`~/projects/kitcheck4.log`） | **P1-07 完成**；以補丁版重跑單題做分數對照（EXP-007） |
 | EXP-007 | 2026-11-18 | `97cbd38`（MCP 補丁版）、其餘同 EXP-005 | `frame-extension-method` 重跑 | 確認 MCP 補丁不降分、作為 P1 版對照 | **score 0.3557（`ok`，11,595 s＝3 h 13 m）**；tokens in 23,487,057／cache 23,086,775／out 320,314；與基線 0.3617 差 −0.006（−1.7%）。本題無 MCP server（`mcp_servers=[]`），補丁碼路徑為 no-op → 差異屬模型執行隨機性 | run `runs/plan-verify-20261118-224102/`；累計 proxy 543 呼叫 | **補丁定版**；單題單次跑的分數噪聲約 ±0.01，日後 A/B 需以多 run 或更大任務集對照 |
 
@@ -260,7 +268,7 @@
 
 | ID | Priority | Area | Symptom | Root cause | Fix | Retest | Status |
 |---|---|---|---|---|---|---|---|
-| DEF-001 | P0 | quick harness／ARTIFACT+TIMEOUT | EXP-008 score 0.0：grader `ERR_NO_SUBMISSION`，全程 25 呼叫都在 `sed/cat/grep` 讀規則檔，最後一步（step 29）模型正要 `cat > gen.py` 產出交付物時被收尾呼叫（`tool_choice=none`）擋下，改以文字輸出 pseudo-`<tool_call>`，從未執行 | ① 15k out 預算對重工程題少一個數量級（完整版 327k）；② 無「交付檢查點」：預算燒一半仍無 write_file 也不強制先寫最小交付版；③ 收尾呼叫完全禁工具，恰好殺掉最重要的一次寫入；④ plan 8 呼叫對小模型無產出（全花在讀檔）；⑤（EXP-009）提前放棄：檢查點按預算 share 觸發，模型只燒 11–22% 就以純文字結束，檢查點從不生效 | 候選：① 交付檢查點（呼叫／token 半數無寫入→注入「立即寫最小交付」指令，75% 後只准 write）；② 收尾呼叫允許 write 類工具（write-only wrap）；③ 依任務量級調-budget（重題 60 min／80 呼叫／60k out）或快速版只跑輕題；④ quick 模式跳過 planner | v2（`8d34278`）同題實測仍 0.0（EXP-009）→ v3 交付閘門（`_writes == 0` 時打回純文字結束 ≤2 次）＋mock gate 案例，再重測 mock＋實測；v3（`16053ed`）已實作：mock 7/7（`gate`：打回 1/2 後補寫 `cat >` 送達 exec；`gate2`：只打回 2/2 上限後接受） ；實測（EXP-010）仍 0.0：模型改以**空 content 結束**，繞過 gate 的 `message.content` 非空條件；v4（`1ea5c67`）實測（EXP-011）仍 0.0 但模式再變：19 次帶工具呼叫誠實工作（696 s、gate 0 次），第 19 呼叫生成交付腳本途中 `stop=output`（17,931 out）截斷未執行 → 失敗族從「提前放棄」轉為「預算燒盡」，根因①主導；預算加檔（EXP-012，`25e3173`）仍 0.0：wall／out 未盡（1,353 s／45,130 out）、`stop=requests@41` ≪ 全域 76 ⇒ 步驟級份額（L581）觸發；模型分段寫腳本（`part2 ok`）未及執行即停 → 失敗族再轉為「步驟配額耗盡」，根因從①轉為配額結構 | IN_PROGRESS（v3 實測失敗、根因已定位；v4（`1ea5c67`）已實作：任何無工具結束（含空 content）都打回、空 assistant turn 不回放；mock 8/8（新增 `gate_empty`） | PENDING（EXP-012 依 Rule 4 判定：全域預算非瓶頸、步驟級份額為約束點；本輪不再加碼；待 mock 定位觸發份額之單變因修復，或改 (c)／(d)） |
+| DEF-001 | P0 | quick harness／ARTIFACT+TIMEOUT | EXP-008 score 0.0：grader `ERR_NO_SUBMISSION`，全程 25 呼叫都在 `sed/cat/grep` 讀規則檔，最後一步（step 29）模型正要 `cat > gen.py` 產出交付物時被收尾呼叫（`tool_choice=none`）擋下，改以文字輸出 pseudo-`<tool_call>`，從未執行 | ① 15k out 預算對重工程題少一個數量級（完整版 327k）；② 無「交付檢查點」：預算燒一半仍無 write_file 也不強制先寫最小交付版；③ 收尾呼叫完全禁工具，恰好殺掉最重要的一次寫入；④ plan 8 呼叫對小模型無產出（全花在讀檔）；⑤（EXP-009）提前放棄：檢查點按預算 share 觸發，模型只燒 11–22% 就以純文字結束，檢查點從不生效 | 候選：① 交付檢查點（呼叫／token 半數無寫入→注入「立即寫最小交付」指令，75% 後只准 write）；② 收尾呼叫允許 write 類工具（write-only wrap）；③ 依任務量級調-budget（重題 60 min／80 呼叫／60k out）或快速版只跑輕題；④ quick 模式跳過 planner | v2（`8d34278`）同題實測仍 0.0（EXP-009）→ v3 交付閘門（`_writes == 0` 時打回純文字結束 ≤2 次）＋mock gate 案例，再重測 mock＋實測；v3（`16053ed`）已實作：mock 7/7（`gate`：打回 1/2 後補寫 `cat >` 送達 exec；`gate2`：只打回 2/2 上限後接受） ；實測（EXP-010）仍 0.0：模型改以**空 content 結束**，繞過 gate 的 `message.content` 非空條件；v4（`1ea5c67`）實測（EXP-011）仍 0.0 但模式再變：19 次帶工具呼叫誠實工作（696 s、gate 0 次），第 19 呼叫生成交付腳本途中 `stop=output`（17,931 out）截斷未執行 → 失敗族從「提前放棄」轉為「預算燒盡」，根因①主導；預算加檔（EXP-012，`25e3173`）仍 0.0：wall／out 未盡（1,353 s／45,130 out）、`stop=requests@41` ≪ 全域 76 ⇒ 步驟級份額（L581）觸發；模型分段寫腳本（`part2 ok`）未及執行即停 → 失敗族再轉為「步驟配額耗盡」，根因從①轉為配額結構 | IN_PROGRESS（v3 實測失敗、根因已定位；v4（`1ea5c67`）已實作：任何無工具結束（含空 content）都打回、空 assistant turn 不回放；mock 8/8（新增 `gate_empty`）；v5（`c476e8c`）mock 9/9（`quota` 精確重現 EXP-012 於 41 死因：verifier 份額耗盡＋空 verdict→曾被當 PASS）並修復：out-of-share 步驟的空 verdict 不再終止 fix 迴圈；實測 EXP-013（2026-11-20）：capped→fix round 照跑（修復生效），但仍 0 分——失敗族轉為「fix round 只讀不寫」（模型收到明確 gap 後仍零 write） | PENDING（配額結構修復完成且實測驗證；剩餘失敗屬模型產出能力，依 Rule 4 與 ADR-009 交使用者 (c) 只跑輕題／(d) 跳 quick 直接 main dev 子集） |
 
 Failure taxonomy：`BOOT / PROTOCOL / MODEL / TOOL / MCP / FILE / FORMAT / CALCULATION / HARD_GATE / RUBRIC / RESOURCE / TIMEOUT / ARTIFACT / PLATFORM / UNKNOWN`
 
