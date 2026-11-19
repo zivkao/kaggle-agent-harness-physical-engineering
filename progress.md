@@ -15,15 +15,16 @@
 
 ### 2026-11-19 — 最終環境與通訊架構（Agent 必讀）
 
-- **Windows 是本專案唯一控制面。** 啟動、停止或在專案 distro 執行命令時，從 Windows 使用 `C:\\Program Files\\WSL\\wsl.exe -d Ubuntu ...`。
-- **WSL `Ubuntu` 是唯一 PLE 專案環境。** Canonical repo 為 `/home/zivkao/projects/ple-solo-harness`；Docker、Harbor、LiteLLM 與評測只在此 distro 執行。
-- **WSL `Ubuntu-24.04` 不參與本專案。** 它是獨立 Claude CLI 環境；Agent 不得從該 distro 修改、啟動或監控 PLE 專案。
-- WSL 全域網路採 `networkingMode=mirrored`。Windows Strata 僅監聽 `127.0.0.1:8080`；Ubuntu 的 LiteLLM 以 `http://127.0.0.1:8080/v1` 直連。
-- 舊的 `ple-model-bridge`、`forwarder.py`、watchdog、WSL gateway IP（如 `172.23.0.1`）與相關開機項已移除，**不得重建**。
-- distro 間 SSH、`target-ubuntu` alias、SSH server、socat relay 與自動啟動項已移除，**不得用 SSH 作為控制通道**。
-- 專案 Ubuntu 不在 Windows 登入時自動啟動；只有需要建置、評測或維護時才由 Windows `wsl.exe` 按需啟動。
-- `D:\\project\\vide-coding\\ple-solo-harness` 只是 Windows 參考副本，不是 canonical Git repo，不得在此提交程式變更。
-- 若 Agent 本身無法呼叫 Windows `wsl.exe`，應停止並交由 Windows 控制面的 Agent／使用者執行，不得自行建立 bridge、SSH 或額外網路暴露。
+- **WSL `Ubuntu` 是唯一 PLE 開發與 Agent 執行環境。** Claude Code、canonical repo、Docker、Harbor、LiteLLM 與評測均在此 distro 內執行；canonical repo 為 `/home/zivkao/projects/ple-solo-harness`。
+- Windows 只負責以 `C:\\Program Files\\WSL\\wsl.exe -d Ubuntu ...` 按需啟動或停止 distro，不作為 Claude 的日常專案控制面。
+- **WSL `Ubuntu-24.04` 不參與本專案。** 它是獨立 Claude CLI 環境，不得修改、啟動或監控 PLE 專案。
+- 專案 Ubuntu 的 Claude Code 版本為 2.1.328，直接在 canonical repo 工作；允許 `bypassPermissions`，但必須以一般使用者 `zivkao` 執行，不得使用 root。
+- 專案 Ubuntu 已關閉 Windows 整碟 automount 與 Windows interop，只精確掛載 `D:\\project\\vide-coding` 至 `/mnt/d/project/vide-coding` 作參考副本同步。
+- WSL 全域網路採 `networkingMode=mirrored`。Windows Strata 僅監聽 `127.0.0.1:8080`；Claude 使用 `http://127.0.0.1:8080`，LiteLLM 使用 `http://127.0.0.1:8080/v1`。
+- 舊的 `ple-model-bridge`、`forwarder.py`、watchdog、WSL gateway IP、distro 間 SSH、socat relay 與相關開機項均已移除，**不得重建**。
+- Agent 在 Ubuntu 內直接使用 Linux 路徑，不得呼叫 `wsl.exe`、不得使用 `\\wsl.localhost`，也不得重新開放其他 Windows 磁碟。
+- `D:\\project\\vide-coding\\ple-solo-harness` 只是 Windows 參考副本，不是 canonical Git repo；程式與 `progress.md` 先在 canonical repo 更新，再同步到該副本。
+- 專案 Ubuntu 不隨 Windows 登入自動啟動；只有需要開發、評測或維護時才按需啟動。
 
 
 **2026-11-19（二）：** DEF-001 使用者選 (a)（修後重測）。quick v2（commit `8d34278`）對 `frame-extension-method` 的重測已跑完（run `plan-verify-20261119-112842`）：仍 **0 分／`ERR_NO_SUBMISSION`**，但失敗模式改變——模型只用 **8/40 呼叫、1,233 輸出 tokens（預算 11–22%）就以純文字回答提前放棄**，40/70% 預算 share 檢查點從未被觸發。下一步 v3：**交付閘門**（見 DEF-001）。
