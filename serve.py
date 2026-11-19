@@ -56,7 +56,11 @@ WRAP_UP = {
 }
 RESULT_CHARS = 20_000  # a longer tool result loses its middle
 # Seconds between retries once the SDK's own quick retries are exhausted.
-RETRY_WAITS = (5, 15, 30, 60, 120)
+# $RETRY_WAITS overrides it (comma-separated) so contract tests can fail
+# fast; production keeps the default backoff.
+RETRY_WAITS = tuple(
+    int(w) for w in os.environ.get("RETRY_WAITS", "5,15,30,60,120").split(",")
+)
 # How endpoints word a 400 saying the conversation no longer fits the context
 # window: Claude, OpenAI and vLLM, Gemini, xAI.
 CONTEXT_FULL = re.compile(
@@ -84,6 +88,22 @@ CHECK_SHARE = 0.25
 # wrap-up
 MIN_STEP_SEC = 120
 MAX_FIX_ROUNDS = 2
+# The endpoint key the evaluator provides. Log lines are free text the
+# graders record, so anything logged passes through `safe`, which replaces
+# the key (asserted by the `redaction` case in tests/mock_contract_test.py).
+API_KEY = os.environ.get("OPENAI_API_KEY", "")
+
+
+def safe(text):
+  """Returns `text` with the API key replaced by a placeholder.
+
+  Args:
+    text: Any string about to be sent as a `log` frame.
+
+  Returns:
+    The text with every occurrence of `$OPENAI_API_KEY` replaced.
+  """
+  return text.replace(API_KEY, "<api-key>") if API_KEY else text
 
 # The evaluator sets OPENAI_BASE_URL and OPENAI_API_KEY for every model.
 # The SDK handles quick retries; recover() handles longer backoffs. Because
@@ -333,7 +353,7 @@ async def recover(session, messages, exc, waits, until):
   if left is not None and left > until:
     wait = min(wait, left - until)
   await session.log(
-      f"model call failed ({str(exc)[:200]}); again in {wait:.0f} s"
+      safe(f"model call failed ({str(exc)[:200]}); again in {wait:.0f} s")
   )
   await asyncio.sleep(wait)
   return True
@@ -419,7 +439,7 @@ async def setup_mcp(session):
       await client.initialize()
       tools = await client.list_tools()
     except (taskbridge.MCPError, taskbridge.TaskError) as exc:
-      await session.log(f"mcp {name}: no tools ({str(exc)[:200]})")
+      await session.log(safe(f"mcp {name}: no tools ({str(exc)[:200]})"))
       continue
     _mcp[name], _mcp_tools[name] = client, tools
     await session.log(f"mcp {name}: {len(tools)} tools")
@@ -520,7 +540,10 @@ async def agent(session, messages, tools, until, final=False):
     messages.append(turn)
     for call in turn["tool_calls"]:
       await session.log(
-          f"{call['function']['name']} {call['function']['arguments'][:200]}"
+          safe(
+              f"{call['function']['name']}"
+              f" {call['function']['arguments'][:200]}"
+          )
       )
       content = await run_tool(session, call["function"])
       messages.append(
@@ -571,20 +594,25 @@ async def solve(session):
   task = session.instruction
   await setup_mcp(session)
   extra = MCP_TOOLS if session.mcp_servers else []
+  # `phase:` lines mark the state machine's transitions in the log so a
+  # recorded run can be replayed step by step (P1-06 structured logs).
+  await session.log("phase: plan")
   plan = await agent(
       session,
       conversation(PLANNER, session, task),
       READ_ONLY + extra,
       until(1 - PLAN_SHARE),
   )
-  await session.log(f"plan: {plan[:1000]}")
+  await session.log(safe(f"plan: {plan[:1000]}"))
+  await session.log("phase: work")
   work = conversation(WORKER, session, f"{task}\n\n## Plan\n{plan}")
   summary = await agent(
       session, work, TOOLS + extra, until(CHECK_SHARE), final=True
   )
-  for _ in range(MAX_FIX_ROUNDS):
+  for round_num in range(1, MAX_FIX_ROUNDS + 1):
     if not time_for(until(CHECK_SHARE / 2)):
       break
+    await session.log(f"phase: verify {round_num}")
     review = (
         f"## Task\n{task}\n\n## Plan\n{plan}\n\n## The engineer's"
         f" summary\n{summary}"
@@ -595,13 +623,14 @@ async def solve(session):
         READ_ONLY + extra,
         until(CHECK_SHARE / 2),
     )
-    await session.log(f"verifier: {verdict[:1000]}")
+    await session.log(safe(f"verifier: {verdict[:1000]}"))
     # PASS alone in any letter case (Markdown emphasis and a full stop aside),
     # or an empty reply, names no gaps
     if verdict.strip("*_. \r\n\t").upper() in ("", "PASS") or not time_for(
         WRAP_UP_SEC
     ):
       break
+    await session.log(f"phase: fix {round_num}")
     work.append({
         "role": "user",
         "content": (
