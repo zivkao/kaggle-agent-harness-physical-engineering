@@ -30,6 +30,8 @@
 
 **2026-11-19（三）：** DEF-001 v3 交付閘門已實作（quick branch `16053ed`）：`deliver` 步驟在非收尾、非截斷的純文字結束且 `_writes == 0` 時打回（GATE 訊息指示立即以 write_file／bash 在精確路徑寫出最小交付物；上限 `QUICK_GATE=2` 次後接受答案；checkpoint、wrap_write、nudge 路徑不受影響）。驗證：mock **7/7**（新增 `gate`：打回 1/2 → 模型補寫 `cat > /app/out.txt` 送達 exec 通道，stop=none；`gate2`：固執模型只打回 2/2 後接受）、AST ok、pyflakes 0、無新增 >80 char 行（11 條長行與 v2 相同，皆為 starter prompt 字串）。依使用者指示**暫停**，同題實測重跑等同意。
 
+**2026-11-19（四）— 環境連線驗證（Windows 控制面按需啟動，全鏈路 PASS）：** ① `wsl.exe -l -v` rc=0，兩 distro 均 `Stopped`（符合按需原則），`-d Ubuntu -u zivkao -e bash` 可啟動並執行（kernel `6.18.58.1`、26.04.1 LTS）；② Windows 端 `http://127.0.0.1:8080/v1/models` → **HTTP 200**，`qwen3.8-flash-next-iq3_s` 狀態 `loaded`（n_ctx 262144）；③ Ubuntu 內 `curl http://127.0.0.1:8080/v1/models` → **HTTP 200**（約 1.5 ms，mirrored loopback 直連生效，無需舊 bridge）；④ 端到端 `chat/completions` 完成一次真實補全（含 usage／timings）；⑤ `~/projects/` 四專案目錄＋`local.env`（600）完整；uv 0.13.9、Harbor 0.20.0、Docker 29.10.0、`docker.service` active。**留意事項：**（1）**LiteLLM `:4000` 檢查時未運行**（WSL 內 4000 無 listener）——它是評測按需服務，`kit check`／`eval/run.py` 前必須先啟動；（2）**Windows 參考副本 `D:\project\vide-coding\ple-solo-harness\progress.md` 落後 canonical（HEAD `aac6556`）**，缺 EXP-009/010 與 DEF-001 v2–v4 記錄，本次已將全檔同步為 canonical 內容，之後以 WSL 端為準。
+
 ### 下一個可執行任務
 
 1. **快速版（DEF-001，已選 (a)）**：v3 實測仍 0 分（EXP-010：空 content 結束繞過 gate）→ v4 已實作（quick `1ea5c67`：任何無工具結束且 `_writes==0` 都打回 ≤2 次，含空 content；mock 8/8）。下一步：以 v4 重跑 `frame-extension-method` 實測（同 EXP-009 設定：`--no-export`、僅 strata）。（使用者指示：v4 完成後暫停——實測重跑等同意。）
