@@ -2,7 +2,7 @@
 
 最後更新：2026-11-19  
 目前階段：`P1 — 最小合法 Harness（提前開工）`  
-整體狀態：`P1_DEF001_V4_GATE_EMPTY_PENDING`  
+整體狀態：`P1_DEF001_V4_GATE_MOCK_PASS`  
 完成度：`規劃 100% / 實作 5% / 官方驗證 50%`
 
 > 本文件是唯一進度真相來源。任務只有附上可重現的驗證證據後才可標記完成。
@@ -13,13 +13,26 @@
 
 **2026-11-19 更新：** P1-07（MCP 中繼工具）已完成並通過 `kit check` 全部 7 階段；補丁版單題重跑 0.3557 vs 基線 0.3617（本題無 MCP，差異屬單次執行的模型隨機性，約 ±0.01）。
 
+### 2026-11-19 — 最終環境與通訊架構（Agent 必讀）
+
+- **Windows 是本專案唯一控制面。** 啟動、停止或在專案 distro 執行命令時，從 Windows 使用 `C:\\Program Files\\WSL\\wsl.exe -d Ubuntu ...`。
+- **WSL `Ubuntu` 是唯一 PLE 專案環境。** Canonical repo 為 `/home/zivkao/projects/ple-solo-harness`；Docker、Harbor、LiteLLM 與評測只在此 distro 執行。
+- **WSL `Ubuntu-24.04` 不參與本專案。** 它是獨立 Claude CLI 環境；Agent 不得從該 distro 修改、啟動或監控 PLE 專案。
+- WSL 全域網路採 `networkingMode=mirrored`。Windows Strata 僅監聽 `127.0.0.1:8080`；Ubuntu 的 LiteLLM 以 `http://127.0.0.1:8080/v1` 直連。
+- 舊的 `ple-model-bridge`、`forwarder.py`、watchdog、WSL gateway IP（如 `172.23.0.1`）與相關開機項已移除，**不得重建**。
+- distro 間 SSH、`target-ubuntu` alias、SSH server、socat relay 與自動啟動項已移除，**不得用 SSH 作為控制通道**。
+- 專案 Ubuntu 不在 Windows 登入時自動啟動；只有需要建置、評測或維護時才由 Windows `wsl.exe` 按需啟動。
+- `D:\\project\\vide-coding\\ple-solo-harness` 只是 Windows 參考副本，不是 canonical Git repo，不得在此提交程式變更。
+- 若 Agent 本身無法呼叫 Windows `wsl.exe`，應停止並交由 Windows 控制面的 Agent／使用者執行，不得自行建立 bridge、SSH 或額外網路暴露。
+
+
 **2026-11-19（二）：** DEF-001 使用者選 (a)（修後重測）。quick v2（commit `8d34278`）對 `frame-extension-method` 的重測已跑完（run `plan-verify-20261119-112842`）：仍 **0 分／`ERR_NO_SUBMISSION`**，但失敗模式改變——模型只用 **8/40 呼叫、1,233 輸出 tokens（預算 11–22%）就以純文字回答提前放棄**，40/70% 預算 share 檢查點從未被觸發。下一步 v3：**交付閘門**（見 DEF-001）。
 
 **2026-11-19（三）：** DEF-001 v3 交付閘門已實作（quick branch `16053ed`）：`deliver` 步驟在非收尾、非截斷的純文字結束且 `_writes == 0` 時打回（GATE 訊息指示立即以 write_file／bash 在精確路徑寫出最小交付物；上限 `QUICK_GATE=2` 次後接受答案；checkpoint、wrap_write、nudge 路徑不受影響）。驗證：mock **7/7**（新增 `gate`：打回 1/2 → 模型補寫 `cat > /app/out.txt` 送達 exec 通道，stop=none；`gate2`：固執模型只打回 2/2 後接受）、AST ok、pyflakes 0、無新增 >80 char 行（11 條長行與 v2 相同，皆為 starter prompt 字串）。依使用者指示**暫停**，同題實測重跑等同意。
 
 ### 下一個可執行任務
 
-1. **快速版（DEF-001，已選 (a)）**：v3＝**交付閘門**已實作（quick `16053ed`：`_writes == 0` 的純文字結束打回 ≤2 次＋GATE 指令；mock 7/7）。下一步：以 v3 重跑 `frame-extension-method` 實測（同 EXP-009 設定：`--no-export`、僅 strata），驗證閘門能否把 0 分轉為有交付物。（使用者指示：v3 已完成並暫停——實測重跑等同意。）
+1. **快速版（DEF-001，已選 (a)）**：v3 實測仍 0 分（EXP-010：空 content 結束繞過 gate）→ v4 已實作（quick `1ea5c67`：任何無工具結束且 `_writes==0` 都打回 ≤2 次，含空 content；mock 8/8）。下一步：以 v4 重跑 `frame-extension-method` 實測（同 EXP-009 設定：`--no-export`、僅 strata）。（使用者指示：v4 完成後暫停——實測重跑等同意。）
 2. `P1-05`／`P1-06`：deadline 行為（`cancel` 後 10 s 內發 `done`）與 structured logs／unit tests（DEVELOPMENT_PLAN P1 出口條件：注入 model 429/500/timeout、tool error、斷線皆能有界結束）。
 2. dev 全量跑的成本決策：本機 strata 29 題約需數天；改用 DeepSeek 等付費 API（flash 單題實估 $0.2–0.4）可多題並行，一晚跑完 29 題，但 `JUDGE_*`／上游切換要在 `model_proxy/config.yaml` 完成，且不影響 `submission.yaml`。
 3. 正式 artifacts 需由宣告模型產生（見 R-012）：提交前要將 proxy 上游換回真的 Vertex `claude-opus-5-5`（目前該 project 的 `aiplatform` API 為 DISABLED，需先開通）。
@@ -238,7 +251,7 @@
 
 | ID | Priority | Area | Symptom | Root cause | Fix | Retest | Status |
 |---|---|---|---|---|---|---|---|
-| DEF-001 | P0 | quick harness／ARTIFACT+TIMEOUT | EXP-008 score 0.0：grader `ERR_NO_SUBMISSION`，全程 25 呼叫都在 `sed/cat/grep` 讀規則檔，最後一步（step 29）模型正要 `cat > gen.py` 產出交付物時被收尾呼叫（`tool_choice=none`）擋下，改以文字輸出 pseudo-`<tool_call>`，從未執行 | ① 15k out 預算對重工程題少一個數量級（完整版 327k）；② 無「交付檢查點」：預算燒一半仍無 write_file 也不強制先寫最小交付版；③ 收尾呼叫完全禁工具，恰好殺掉最重要的一次寫入；④ plan 8 呼叫對小模型無產出（全花在讀檔）；⑤（EXP-009）提前放棄：檢查點按預算 share 觸發，模型只燒 11–22% 就以純文字結束，檢查點從不生效 | 候選：① 交付檢查點（呼叫／token 半數無寫入→注入「立即寫最小交付」指令，75% 後只准 write）；② 收尾呼叫允許 write 類工具（write-only wrap）；③ 依任務量級調-budget（重題 60 min／80 呼叫／60k out）或快速版只跑輕題；④ quick 模式跳過 planner | v2（`8d34278`）同題實測仍 0.0（EXP-009）→ v3 交付閘門（`_writes == 0` 時打回純文字結束 ≤2 次）＋mock gate 案例，再重測 mock＋實測；v3（`16053ed`）已實作：mock 7/7（`gate`：打回 1/2 後補寫 `cat >` 送達 exec；`gate2`：只打回 2/2 上限後接受） ；實測（EXP-010）仍 0.0：模型改以**空 content 結束**，繞過 gate 的 `message.content` 非空條件 | IN_PROGRESS（v3 實測失敗、根因已定位；v4＝gate 條件改為任何無工具結束（含空 content）都打回，待同意） |
+| DEF-001 | P0 | quick harness／ARTIFACT+TIMEOUT | EXP-008 score 0.0：grader `ERR_NO_SUBMISSION`，全程 25 呼叫都在 `sed/cat/grep` 讀規則檔，最後一步（step 29）模型正要 `cat > gen.py` 產出交付物時被收尾呼叫（`tool_choice=none`）擋下，改以文字輸出 pseudo-`<tool_call>`，從未執行 | ① 15k out 預算對重工程題少一個數量級（完整版 327k）；② 無「交付檢查點」：預算燒一半仍無 write_file 也不強制先寫最小交付版；③ 收尾呼叫完全禁工具，恰好殺掉最重要的一次寫入；④ plan 8 呼叫對小模型無產出（全花在讀檔）；⑤（EXP-009）提前放棄：檢查點按預算 share 觸發，模型只燒 11–22% 就以純文字結束，檢查點從不生效 | 候選：① 交付檢查點（呼叫／token 半數無寫入→注入「立即寫最小交付」指令，75% 後只准 write）；② 收尾呼叫允許 write 類工具（write-only wrap）；③ 依任務量級調-budget（重題 60 min／80 呼叫／60k out）或快速版只跑輕題；④ quick 模式跳過 planner | v2（`8d34278`）同題實測仍 0.0（EXP-009）→ v3 交付閘門（`_writes == 0` 時打回純文字結束 ≤2 次）＋mock gate 案例，再重測 mock＋實測；v3（`16053ed`）已實作：mock 7/7（`gate`：打回 1/2 後補寫 `cat >` 送達 exec；`gate2`：只打回 2/2 上限後接受） ；實測（EXP-010）仍 0.0：模型改以**空 content 結束**，繞過 gate 的 `message.content` 非空條件 | IN_PROGRESS（v3 實測失敗、根因已定位；v4（`1ea5c67`）已實作：任何無工具結束（含空 content）都打回、空 assistant turn 不回放；mock 8/8（新增 `gate_empty`） | IN_PROGRESS（v4 實作＋mock 8/8；依指示暫停，同題實測重跑待同意） |
 
 Failure taxonomy：`BOOT / PROTOCOL / MODEL / TOOL / MCP / FILE / FORMAT / CALCULATION / HARD_GATE / RUBRIC / RESOURCE / TIMEOUT / ARTIFACT / PLATFORM / UNKNOWN`
 
