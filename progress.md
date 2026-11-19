@@ -1,8 +1,8 @@
 # PLE Solo Harness — Progress
 
-最後更新：2026-11-18  
+最後更新：2026-11-19  
 目前階段：`P1 — 最小合法 Harness（提前開工）`  
-整體狀態：`P1_MCP_VERIFIED`  
+整體狀態：`P1_DEF001_V3_GATE_READY`  
 完成度：`規劃 100% / 實作 5% / 官方驗證 50%`
 
 > 本文件是唯一進度真相來源。任務只有附上可重現的驗證證據後才可標記完成。
@@ -13,9 +13,11 @@
 
 **2026-11-19 更新：** P1-07（MCP 中繼工具）已完成並通過 `kit check` 全部 7 階段；補丁版單題重跑 0.3557 vs 基線 0.3617（本題無 MCP，差異屬單次執行的模型隨機性，約 ±0.01）。
 
+**2026-11-19（二）：** DEF-001 使用者選 (a)（修後重測）。quick v2（commit `8d34278`）對 `frame-extension-method` 的重測已跑完（run `plan-verify-20261119-112842`）：仍 **0 分／`ERR_NO_SUBMISSION`**，但失敗模式改變——模型只用 **8/40 呼叫、1,233 輸出 tokens（預算 11–22%）就以純文字回答提前放棄**，40/70% 預算 share 檢查點從未被觸發。下一步 v3：**交付閘門**（見 DEF-001）。
+
 ### 下一個可執行任務
 
-1. **快速版決策（DEF-001）**：quick-v1 在重工程題得 0 分（預算少一個數量級＋收尾禁工具殺掉寫入）。選項：(a) 修 DEF-001（交付檢查點＋write-only 收尾＋跳 planner）後再測；(b) 預算加檔（60 min／80 呼叫／60k out）；(c) 快速版只用於輕題、重題直接完整版；(d) 跳過快速版、直接對 main 版跑 dev 子集。
+1. **快速版（DEF-001，已選 (a)）**：v2（`8d34278`：40/70% 檢查點＋write-only 收尾＋跳 planner）重測仍 0 分（EXP-009），根因轉為「提前投降」。下一步 v3＝**交付閘門**：worker 在 `_writes == 0` 時的純文字結束打回（≤2 次，`QUICK_GATE`）＋mock gate 案例，再重測同題。（使用者指示：v3 修改完成後暫停。）
 2. `P1-05`／`P1-06`：deadline 行為（`cancel` 後 10 s 內發 `done`）與 structured logs／unit tests（DEVELOPMENT_PLAN P1 出口條件：注入 model 429/500/timeout、tool error、斷線皆能有界結束）。
 2. dev 全量跑的成本決策：本機 strata 29 題約需數天；改用 DeepSeek 等付費 API（flash 單題實估 $0.2–0.4）可多題並行，一晚跑完 29 題，但 `JUDGE_*`／上游切換要在 `model_proxy/config.yaml` 完成，且不影響 `submission.yaml`。
 3. 正式 artifacts 需由宣告模型產生（見 R-012）：提交前要將 proxy 上游換回真的 Vertex `claude-opus-5-5`（目前該 project 的 `aiplatform` API 為 DISABLED，需先開通）。
@@ -221,6 +223,7 @@
 | EXP-004 | 2026-11-18 | 新 distro WSL `Ubuntu`（26.04.1）、Docker 29.10.0、uv 0.13.9、Harbor 0.20.0、未修改 starter `c9f6d4d` | 官方 `kit check --rebuild` | 遷移後完整重跑官方驗證 | `[PASS] submission.yaml / files: 14 files / build: bundle 115 MiB in 32 s（映像 `plebench-serve:2bffb49f0e8d681e`）/ model: answered in 17.7 s through the egress proxy / listen: websocket accepted 2 s / smoke: hello.txt written, done in 87 s with 6 request(s), 7839 in / 1399 out tokens` | 日誌 `~/projects/kitcheck3.log`（新 distro）；另 `[WARN] mcp`（harness 未以 HTTP 取回 `/app/mcp.txt`）、`[WARN] artifacts`（尚無 dev-set artifacts） | **`rc=0`，P0-06 完成**；下一步單題 baseline |
 | EXP-005 | 2026-11-18 | `c9f6d4d`（未修改 starter）、新 distro `Ubuntu`、bridge＋LiteLLM 別名代理 | `frame-extension-method`（checks，agent 21600 s／verifier 9900 s） | 單題 dev baseline，建立 `artifacts/`，量測 R-003／R-010 成本 | **score 0.3617（`ok`，14,310 s）**；300 次模型呼叫全 200；tokens in 34,618,230／cache 34,076,850／out 326,888；1 個 deliverable（`submission.zip`）＋final message | 全程 3 h 58.5 m；有效 wall 吞吐 22.8 tok/s out；換算 DeepSeek flash＝單題 $0.19（離峰）–0.38（高峰），29 題約 $5–25 | starter 本地基線確立；P1 改進以此 0.3617 為對照 |
 | EXP-008 | 2026-11-19 | `quick` branch（`f6cf590`）：QUICK 預算 1800 s／40 呼叫／15,000 輸出 tokens，收尾保留 300 s／4 呼叫／4,000 tokens；單呼叫 ≤2,000 out、≤180 s；plan/work/verify 步驟级呼叫 cap；重複工具呼叫遮罩；工具輸出 clip 6,000；bash 90 s；低推理檔；deliver-first 提示；正式 `submission.yaml`/main 不動（ADR-009，worktree `ple-solo-harness-quick`） | 先 mock 後實測 `frame-extension-method` | 小模型快速迴圈 | **mock 4/4**：wall（stop=wall，4.1 s 內結束）／requests（≤8 呼叫，stop=requests）／output（stop=output）／clean（stop=none）皆 `[PASS]`（`tests/mock_quick_test.py`） | 實測 run `runs/plan-verify-20261119-074318/`（07:42 啟動，`--no-export`，僅 strata） | **score 0.0／889 s／25 呼叫／out 19,000（stop=output）**；grader `ERR_NO_SUBMISSION: no submission.zip was collected` → 零交付物直接 0 分（見 DEF-001） |
+| EXP-009 | 2026-11-19 | `8d34278`（quick v2：40/70% 交付檢查點、收尾 write-only、預設跳 planner；mock 5/5） | `frame-extension-method` | DEF-001 (a) 修復後重測（`--no-export`，僅 strata） | **score 0.0／1,602 s**；grader 仍 `ERR_NO_SUBMISSION`；tokens in 118,435／cache 108,432／**out 1,233**；trajectory：8 次呼叫＝14 次唯讀工具後模型以純文字回答結束（`stop=none`），預算 share 僅 0.22 → 40/70% 檢查點未觸發 | run `runs/plan-verify-20261119-112842/` | **v2 修復不足**：失敗模式變為「提前放棄」；教訓＝預算式閘門對「不燒預算的模型」無效，需事件式交付閘門（v3） |
 | EXP-006 | 2026-11-18 | `97cbd38`：serve.py 加 `mcp_list`／`mcp_call` 中繼工具（MCPClient 於 task 開始時 initialize＋list_tools 並快取；planner/worker/verifier 三角色皆可呼叫；輸出 clip、args 以 JSON字串傳遞） | 官方 `kit check`（含 `mcp` 階段） | 讓 harness 正式走協議的 `http` 請求存取任務 MCP server，消除 `[WARN] mcp` | 靜態驗證：AST ok、pyflakes 0、無新增 >80 char 行；**`kit check` 22:3x：`[PASS] mcp`（82 s、13 requests、13,814 in／1,211 out）、6 階段全 PASS、僅剩 `artifacts` WARN**；映像 `plebench-serve:b8a6572ec27dd14a`（`~/projects/kitcheck4.log`） | **P1-07 完成**；以補丁版重跑單題做分數對照（EXP-007） |
 | EXP-007 | 2026-11-18 | `97cbd38`（MCP 補丁版）、其餘同 EXP-005 | `frame-extension-method` 重跑 | 確認 MCP 補丁不降分、作為 P1 版對照 | **score 0.3557（`ok`，11,595 s＝3 h 13 m）**；tokens in 23,487,057／cache 23,086,775／out 320,314；與基線 0.3617 差 −0.006（−1.7%）。本題無 MCP server（`mcp_servers=[]`），補丁碼路徑為 no-op → 差異屬模型執行隨機性 | run `runs/plan-verify-20261118-224102/`；累計 proxy 543 呼叫 | **補丁定版**；單題單次跑的分數噪聲約 ±0.01，日後 A/B 需以多 run 或更大任務集對照 |
 
@@ -232,7 +235,7 @@
 
 | ID | Priority | Area | Symptom | Root cause | Fix | Retest | Status |
 |---|---|---|---|---|---|---|---|
-| DEF-001 | P0 | quick harness／ARTIFACT+TIMEOUT | EXP-008 score 0.0：grader `ERR_NO_SUBMISSION`，全程 25 呼叫都在 `sed/cat/grep` 讀規則檔，最後一步（step 29）模型正要 `cat > gen.py` 產出交付物時被收尾呼叫（`tool_choice=none`）擋下，改以文字輸出 pseudo-`<tool_call>`，從未執行 | ① 15k out 預算對重工程題少一個數量級（完整版 327k）；② 無「交付檢查點」：預算燒一半仍無 write_file 也不強制先寫最小交付版；③ 收尾呼叫完全禁工具，恰好殺掉最重要的一次寫入；④ plan 8 呼叫對小模型無產出（全花在讀檔） | 候選：① 交付檢查點（呼叫／token 半數無寫入→注入「立即寫最小交付」指令，75% 後只准 write）；② 收尾呼叫允許 write 類工具（write-only wrap）；③ 依任務量級調-budget（重題 60 min／80 呼叫／60k out）或快速版只跑輕題；④ quick 模式跳過 planner | 修後重跑同題 mock＋實測 | OPEN（待使用者決策） |
+| DEF-001 | P0 | quick harness／ARTIFACT+TIMEOUT | EXP-008 score 0.0：grader `ERR_NO_SUBMISSION`，全程 25 呼叫都在 `sed/cat/grep` 讀規則檔，最後一步（step 29）模型正要 `cat > gen.py` 產出交付物時被收尾呼叫（`tool_choice=none`）擋下，改以文字輸出 pseudo-`<tool_call>`，從未執行 | ① 15k out 預算對重工程題少一個數量級（完整版 327k）；② 無「交付檢查點」：預算燒一半仍無 write_file 也不強制先寫最小交付版；③ 收尾呼叫完全禁工具，恰好殺掉最重要的一次寫入；④ plan 8 呼叫對小模型無產出（全花在讀檔）；⑤（EXP-009）提前放棄：檢查點按預算 share 觸發，模型只燒 11–22% 就以純文字結束，檢查點從不生效 | 候選：① 交付檢查點（呼叫／token 半數無寫入→注入「立即寫最小交付」指令，75% 後只准 write）；② 收尾呼叫允許 write 類工具（write-only wrap）；③ 依任務量級調-budget（重題 60 min／80 呼叫／60k out）或快速版只跑輕題；④ quick 模式跳過 planner | v2（`8d34278`）同題實測仍 0.0（EXP-009）→ v3 交付閘門（`_writes == 0` 時打回純文字結束 ≤2 次）＋mock gate 案例，再重測 mock＋實測 | IN_PROGRESS（使用者選 (a)；v3 gate 待實作，實作後暫停待指示） |
 
 Failure taxonomy：`BOOT / PROTOCOL / MODEL / TOOL / MCP / FILE / FORMAT / CALCULATION / HARD_GATE / RUBRIC / RESOURCE / TIMEOUT / ARTIFACT / PLATFORM / UNKNOWN`
 
