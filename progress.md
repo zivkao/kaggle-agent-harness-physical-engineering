@@ -42,12 +42,14 @@
 - **EXP-013 結果：仍 0.0／1,583 s**，`stop=requests requests=36 output_tokens=39,705`（in 702,885／cache 648,017）。但轉錄檔 `agent/plan-verify.txt` 顯示 **v5 修復如設計生效**：verifier 兩度 `capped: step spent its 4-call share`（呼叫 22、31）後**不再中斷執行**，兩輪 fix round 都跑了（EXP-012 在這裡就死）；gate 也首次觸發 2/2 次。零分原因變成新的失敗族：**「fix round 只讀不寫」**——verifier 明列「完全沒有交付物，寫這六個檔再 zip」，worker 的 fix round 卻全部花在 `ls`/`find`/`head` 重讀（0 次 write），MAX_FIX_ROUNDS=2 用盡後 `capture files={}`。**配額結構不再是約束點；本模型在此預算下不產出（能力／紀律問題，含 ortools 缺失）。**依 Rule 4：本輪不再改 quick 參數，DEF-001 進入 (c)／(d) 使用者決策。
 - **P1-05／P1-06 實作（main branch `eb918d8`）**：serve.py 加 `phase:` 狀態機日誌標記、`safe()` 對所有 log 幀遮罩 `OPENAI_API_KEY`、`RETRY_WAITS` 可用 `$RETRY_WAITS` 覆蓋（測試縮時）；新增 `tests/mock_contract_test.py` 反向注入契約測試 **10/10**：`clean／fix_round／retry_429／retry_dead（400 不合任何重試規則→有界 error 幀）／timeout_wrap（慢模型 6 s 時鐘→12 s 內 done）／tool_error／context_full（400 溢出→剪舊 tool 結果重試）／cancel（10 s 窗口內 done，final="(stopped: time is up)"）／socket_close（斷線後伺服器存活、接新任務到 done）／redaction（key 藏在錯誤 body 裡，任何 log 幀都不得出現）`。pyflakes 0、AST ok、無新增 >80 char 行。官方 `kit check` 於補丁後重跑（`kitcheck5.log`，見 EXP-014）。
 
+**2026-11-20（八）：使用者選 (c) → ADR-010。dev 29 題完成可觀察分級（light 14／heavy 14／uncertain 1，見 §13），規則先於結果明文化；quick 僅限 light。** 建議最小實驗組合（**未跑，等同意**）：quick＝`fire-test-validation-memo`（無 MCP 檔案題）、`emergency-spillway-check`（MCP×8，實戰驗證 P1-07 中繼工具）、`engineers-estimate-check`（MCP×8 電機域）；uncertain 探測＝`data-center-site-model`（quick 一次，零產出即歸 heavy）；heavy 留 main＝`roof-deck-design`（checks, 中量）＋`eor-review-corrections`（checks-judge）（frame-extension 已有完整基線 0.3617，不需重跑）。分級依據與每題觸發規則見 §13。
+
 ### 下一個可執行任務
 
-1. **DEF-001 進入決策點（EXP-013 後）**：v5 已修復配額結構（實測證據：capped→fix round 照跑；mock `quota` 9/9 已先預測），但 quick 在此重工程題仍然 0 分，失敗族為「fix round 只讀不寫／模型不產出」。依 ADR-009 revisit trigger，**待使用者選**：**(c)** quick 只跑輕題（先做 dev 29 題的輕重分級）／**(d)** 跳 quick 直接 main dev 子集（完整版單題 3–4 h）。若選 (c)，候選單變因：fix-round 間隙提示後若 `writes==0` 則將 gap verdict 直接轉為「立即寫最小交付」指令（事件式，呼應 v3 gate 邏輯）。
-2. **EXP-014（本輪已跑）**：main 補丁後 `kit check` 全階段結果記入 §6（`~/projects/kitcheck5.log`）。
-2. dev 全量跑的成本決策：本機 strata 29 題約需數天；改用 DeepSeek 等付費 API（flash 單題實估 $0.2–0.4）可多題並行，一晚跑完 29 題，但 `JUDGE_*`／上游切換要在 `model_proxy/config.yaml` 完成，且不影響 `submission.yaml`。
-3. 正式 artifacts 需由宣告模型產生（見 R-012）：提交前要將 proxy 上游換回真的 Vertex `claude-opus-5-5`（目前該 project 的 `aiplatform` API 為 DISABLED，需先開通）。
+1. **EXP-015（等同意）**：§1（八）的 3 light quick＋1 uncertain 探測，單題預估 15–40 min（strata）。出口條件＝light 題 `capture files≠{}` 且分數 > 0；quick 迴圈自此可用。
+2. **EXP-016（等同意，非同步）**：heavy main 子集 `roof-deck-design`（＋`eor-review-corrections`），單題 2–4 h，建議夜間跑。
+3. dev 全量跑的成本決策：本機 strata 29 題約需數天；改用 DeepSeek 等付費 API（flash 單題實估 $0.2–0.4）可多題並行，一晚跑完 29 題，但 `JUDGE_*`／上游切換要在 `model_proxy/config.yaml` 完成，且不影響 `submission.yaml`。
+4. 正式 artifacts 需由宣告模型產生（見 R-012）：提交前要將 proxy 上游換回真的 Vertex `claude-opus-5-5`（目前該 project 的 `aiplatform` API 為 DISABLED，需先開通）。
 
 ### 本階段出口條件
 
@@ -268,7 +270,7 @@
 
 | ID | Priority | Area | Symptom | Root cause | Fix | Retest | Status |
 |---|---|---|---|---|---|---|---|
-| DEF-001 | P0 | quick harness／ARTIFACT+TIMEOUT | EXP-008 score 0.0：grader `ERR_NO_SUBMISSION`，全程 25 呼叫都在 `sed/cat/grep` 讀規則檔，最後一步（step 29）模型正要 `cat > gen.py` 產出交付物時被收尾呼叫（`tool_choice=none`）擋下，改以文字輸出 pseudo-`<tool_call>`，從未執行 | ① 15k out 預算對重工程題少一個數量級（完整版 327k）；② 無「交付檢查點」：預算燒一半仍無 write_file 也不強制先寫最小交付版；③ 收尾呼叫完全禁工具，恰好殺掉最重要的一次寫入；④ plan 8 呼叫對小模型無產出（全花在讀檔）；⑤（EXP-009）提前放棄：檢查點按預算 share 觸發，模型只燒 11–22% 就以純文字結束，檢查點從不生效 | 候選：① 交付檢查點（呼叫／token 半數無寫入→注入「立即寫最小交付」指令，75% 後只准 write）；② 收尾呼叫允許 write 類工具（write-only wrap）；③ 依任務量級調-budget（重題 60 min／80 呼叫／60k out）或快速版只跑輕題；④ quick 模式跳過 planner | v2（`8d34278`）同題實測仍 0.0（EXP-009）→ v3 交付閘門（`_writes == 0` 時打回純文字結束 ≤2 次）＋mock gate 案例，再重測 mock＋實測；v3（`16053ed`）已實作：mock 7/7（`gate`：打回 1/2 後補寫 `cat >` 送達 exec；`gate2`：只打回 2/2 上限後接受） ；實測（EXP-010）仍 0.0：模型改以**空 content 結束**，繞過 gate 的 `message.content` 非空條件；v4（`1ea5c67`）實測（EXP-011）仍 0.0 但模式再變：19 次帶工具呼叫誠實工作（696 s、gate 0 次），第 19 呼叫生成交付腳本途中 `stop=output`（17,931 out）截斷未執行 → 失敗族從「提前放棄」轉為「預算燒盡」，根因①主導；預算加檔（EXP-012，`25e3173`）仍 0.0：wall／out 未盡（1,353 s／45,130 out）、`stop=requests@41` ≪ 全域 76 ⇒ 步驟級份額（L581）觸發；模型分段寫腳本（`part2 ok`）未及執行即停 → 失敗族再轉為「步驟配額耗盡」，根因從①轉為配額結構 | IN_PROGRESS（v3 實測失敗、根因已定位；v4（`1ea5c67`）已實作：任何無工具結束（含空 content）都打回、空 assistant turn 不回放；mock 8/8（新增 `gate_empty`）；v5（`c476e8c`）mock 9/9（`quota` 精確重現 EXP-012 於 41 死因：verifier 份額耗盡＋空 verdict→曾被當 PASS）並修復：out-of-share 步驟的空 verdict 不再終止 fix 迴圈；實測 EXP-013（2026-11-20）：capped→fix round 照跑（修復生效），但仍 0 分——失敗族轉為「fix round 只讀不寫」（模型收到明確 gap 後仍零 write） | PENDING（配額結構修復完成且實測驗證；剩餘失敗屬模型產出能力，依 Rule 4 與 ADR-009 交使用者 (c) 只跑輕題／(d) 跳 quick 直接 main dev 子集） |
+| DEF-001 | P0 | quick harness／ARTIFACT+TIMEOUT | EXP-008 score 0.0：grader `ERR_NO_SUBMISSION`，全程 25 呼叫都在 `sed/cat/grep` 讀規則檔，最後一步（step 29）模型正要 `cat > gen.py` 產出交付物時被收尾呼叫（`tool_choice=none`）擋下，改以文字輸出 pseudo-`<tool_call>`，從未執行 | ① 15k out 預算對重工程題少一個數量級（完整版 327k）；② 無「交付檢查點」：預算燒一半仍無 write_file 也不強制先寫最小交付版；③ 收尾呼叫完全禁工具，恰好殺掉最重要的一次寫入；④ plan 8 呼叫對小模型無產出（全花在讀檔）；⑤（EXP-009）提前放棄：檢查點按預算 share 觸發，模型只燒 11–22% 就以純文字結束，檢查點從不生效 | 候選：① 交付檢查點（呼叫／token 半數無寫入→注入「立即寫最小交付」指令，75% 後只准 write）；② 收尾呼叫允許 write 類工具（write-only wrap）；③ 依任務量級調-budget（重題 60 min／80 呼叫／60k out）或快速版只跑輕題；④ quick 模式跳過 planner | v2（`8d34278`）同題實測仍 0.0（EXP-009）→ v3 交付閘門（`_writes == 0` 時打回純文字結束 ≤2 次）＋mock gate 案例，再重測 mock＋實測；v3（`16053ed`）已實作：mock 7/7（`gate`：打回 1/2 後補寫 `cat >` 送達 exec；`gate2`：只打回 2/2 上限後接受） ；實測（EXP-010）仍 0.0：模型改以**空 content 結束**，繞過 gate 的 `message.content` 非空條件；v4（`1ea5c67`）實測（EXP-011）仍 0.0 但模式再變：19 次帶工具呼叫誠實工作（696 s、gate 0 次），第 19 呼叫生成交付腳本途中 `stop=output`（17,931 out）截斷未執行 → 失敗族從「提前放棄」轉為「預算燒盡」，根因①主導；預算加檔（EXP-012，`25e3173`）仍 0.0：wall／out 未盡（1,353 s／45,130 out）、`stop=requests@41` ≪ 全域 76 ⇒ 步驟級份額（L581）觸發；模型分段寫腳本（`part2 ok`）未及執行即停 → 失敗族再轉為「步驟配額耗盡」，根因從①轉為配額結構 | IN_PROGRESS（v3 實測失敗、根因已定位；v4（`1ea5c67`）已實作：任何無工具結束（含空 content）都打回、空 assistant turn 不回放；mock 8/8（新增 `gate_empty`）；v5（`c476e8c`）mock 9/9（`quota` 精確重現 EXP-012 於 41 死因：verifier 份額耗盡＋空 verdict→曾被當 PASS）並修復：out-of-share 步驟的空 verdict 不再終止 fix 迴圈；實測 EXP-013（2026-11-20）：capped→fix round 照跑（修復生效），但仍 0 分——失敗族轉為「fix round 只讀不寫」（模型收到明確 gap 後仍零 write） | SCOPED-BY-ADR-010（2026-11-20 使用者選 (c)：heavy 題不再跑 quick，DEF-001 的 quick 側修復止於 v5；剩餘驗證＝EXP-015 light 題能否正常產出。`writes==0` 事件式指令為備選單變因，僅在 light 題也出現同樣症狀時才動） |
 
 Failure taxonomy：`BOOT / PROTOCOL / MODEL / TOOL / MCP / FILE / FORMAT / CALCULATION / HARD_GATE / RUBRIC / RESOURCE / TIMEOUT / ARTIFACT / PLATFORM / UNKNOWN`
 
@@ -305,7 +307,8 @@ Failure taxonomy：`BOOT / PROTOCOL / MODEL / TOOL / MCP / FILE / FORMAT / CALCU
 | ADR-006 | 2026-11-17 | 不修改 `submission.yaml` 的模型宣告，改用 LiteLLM 別名代理接到本機 strata 模型 | 保持 starter 逐位元組不變，本地與官方只差上游端點；Proxy 設定與 `kit/model_proxy/start.sh` 同版（litellm 1.90.0） | 需要可比較雲端模型分數時 |
 | ADR-007 | 2026-11-17 | Harbor 依官方 `HARBOR_VERSION` 釘在 0.20.0（外加 `websockets`） | 新版 Harbor 與 kit 的 agent/environment 介面不符 | 官方 repo 升級 pin |
 | ADR-008 | 2026-11-18 | 開發发行版改為 WSL `Ubuntu`（26.04.1 LTS）；舊 `Ubuntu-24.04` 只作為資料來源保留 | 使用者明確要求換 distro；實測新 distro 可用：Docker 官方 apt repo 已有 `resolute` 通道（docker-ce 29.10.0）、Harbor 0.20.0 可裝、`kit check` 前 6 階段全 PASS | 新 distro 出現套件不相容（尚未發生） |
-| ADR-009 | 2026-11-19 | 快速版走 `quick` branch＋`ple-solo-harness-quick` worktree：內部預算 30 分鐘／40 次呼叫（含重試與收尾）／15,000 累計輸出 tokens，保留 5 分鐘＋4 呼叫＋4,000 tokens 收尾；單次呼叫輸出≤2,000、逾時≤180 s；`submission.yaml` 與 main branch（正式提交設定）完全不動 | 本機 strata 完整版單題 3–4 h，dev 迴圈太慢；先跑快速版評估、再對收斂版跑完整版生成 artifacts | 快速版分數明顯掉到不可用（<基線 −0.1），且原因無法在完整版修復 |
+| ADR-009 | 2026-11-19 | 快速版走 `quick` branch＋`ple-solo-harness-quick` worktree：內部預算 30 分鐘／40 次呼叫（含重試與收尾）／15,000 累計輸出 tokens，保留 5 分鐘＋4 呼叫＋4,000 tokens 收尾；單次呼叫輸出≤2,000、逾時≤180 s；`submission.yaml` 與 main branch（正式提交設定）完全不動 | 本機 strata 完整版單題 3–4 h，dev 迴圈太慢；先跑快速版評估、再對收斂版跑完整版生成 artifacts | 快速版分數明顯掉到不可用（<基線 −0.1），且原因無法在完整版修復 — **已觸發，由 ADR-010 接手** |
+| ADR-010 | 2026-11-20 | 依 ADR-009 revisit 使用者選 (c)：**quick 只跑 light 題（§13 分級 14 題）**；heavy（14 題）固定走 main 完整版；uncertain（1 題）以 quick 探測一次，失敗即歸 heavy、不反覆修 harness | EXP-013 證明配額結構已修好但模型在 heavy 題（294 activities／6 檔／zip）於任何 quick 預算下不產出（6×0 分，含 v5）；在 heavy 題繼續燒 quick 無資訊價值 | light 題的 quick run 仍 0 交付（EXP-015 失敗）→ 重新評估 quick 是否值得保留 |
 
 ---
 
@@ -377,4 +380,65 @@ Failure taxonomy：`BOOT / PROTOCOL / MODEL / TOOL / MCP / FILE / FORMAT / CALCU
 - 追記：在 WSL 內用 `nohup ... &` 起的長時間工作，shell 結束時仍會收到 SIGINT（`rc=130`）；改用 `setsid nohup ... </dev/null >log 2>&1 &` 才能活過 shell 終止。
 
 規避（R-008）：OpenCode shell 原先指向失效的 `WindowsApps\pwsh.exe` alias；已於 `C:\Users\ZivKao\.config\opencode\opencode.json` 加入 `"shell": "C:\\Program Files\\PowerShell\\7\\pwsh.exe"`，shell 已恢復可用。
+
+---
+
+## 13. Dev-set triage（ADR-010，2026-11-20）
+
+訊號全部取自本地 dev 資料（`~/projects/ple-data/tasks/<id>/`），可重算、不靠題名：
+
+- **D**＝`instruction.md` 內反引號裸檔名（無斜線）＋ `/filesystem|/app/output` 輸出路徑的 distinct 數（交付檔數代理；prose 命名的單文件 memo 題 D 會低估，已逐題核對 8 個 D≤1 候選）。
+- **Corpus**＝`environment/filesystem/`（無則 `environment/files/`）總檔案數／MB（agent 要讀的資料量；world-export 題另透過 MCP app 讀同一文件樹）。
+- **MCP**＝`environment/tools/mcp.json` 的 `mcpServers` 數（0＝純檔案題）。
+- **InstKB**＝`instruction.md` KB（規格長度代理）。
+
+分類規則（依序套用，first-hit-wins；先寫規則再看資料）：
+
+1. `R-H1` D ≥ 4 → **heavy**
+2. `R-H2` Corpus > 15 MB → **heavy**
+3. `R-H3` InstKB ≥ 10 → **heavy**
+4. `R-H4` instruction 明文要求「以程式產出」交付物（如 "IFC4 model built by a script"）→ **heavy**
+5. `R-L1` D ≤ 1 且 InstKB ≤ 2 且 Corpus ≤ 6 MB → **light**
+6. `R-L2` D ≤ 1 且 InstKB ≤ 3 且 Corpus ≤ 3 MB → **light**
+7. 其餘 → **uncertain**（只准 quick 探測一次；失敗歸 heavy）
+
+過往 run 佐证：`frame-extension-method` full 0.3617（300 呼叫／14,310 s）、quick 六次全 0（EXP-008/009/010/011/012/013）——與 heavy 分類一致。其餘 28 題無 run 資料。
+
+| task | D | files | MB | MCP | InstKB | class | 觸發 |
+|---|---:|---:|---:|---:|---:|---|---|
+| backfeed-energization-reply | 1 | 95 | 5.5 | 13 | 1.7 | light | R-L1 |
+| emergency-spillway-check | 1 | 56 | 1.0 | 8 | 1.1 | light | R-L1 |
+| engineers-estimate-check | 0 | 56 | 1.0 | 8 | 1.2 | light | R-L1 |
+| fill-compaction-acceptance | 1 | 55 | 1.5 | 9 | 1.1 | light | R-L1 |
+| fire-solve-convergence | 1 | 50 | 1.2 | 8 | 1.8 | light | R-L1 |
+| footing-settlement-verification | 0 | 55 | 1.5 | 9 | 0.8 | light | R-L1 |
+| les-mesh-resolution | 1 | 50 | 1.2 | 8 | 1.0 | light | R-L1 |
+| permission-to-operate-memo | 1 | 95 | 5.5 | 13 | 1.7 | light | R-L1 |
+| pre-application-capacity-response | 1 | 95 | 5.5 | 13 | 1.0 | light | R-L1 |
+| shoring-design-verification | 1 | 55 | 1.5 | 9 | 1.4 | light | R-L1 |
+| solar-supplemental-review | 0 | 53 | 5.3 | 13 | 0.6 | light | R-L1 |
+| solar-witness-test-package | 0 | 53 | 5.3 | 13 | 1.5 | light | R-L1 |
+| fire-test-validation-memo | 0 | 50 | 1.2 | 0 | 2.6 | light | R-L2 |
+| landscape-sheet-revision | 0 | 112 | 2.0 | 0 | 0.7 | light | R-L2 |
+| data-center-site-model | 3 | 6 | 0.0 | 0 | 3.7 | uncertain | （探測一次） |
+| cooling-water-flush-plan | 9 | 51 | 20.2 | 0 | 13.4 | heavy | R-H1,H2,H3 |
+| data-hall-device-takeoff | 7 | 38 | 37.2 | 0 | 5.7 | heavy | R-H1,H2 |
+| data-hall-mep-routing | 0 | 8 | 1.4 | 0 | 5.5 | heavy | R-H4（IFC4 由 script 產出） |
+| data-hall-mep-routing-offset | 0 | 8 | 1.4 | 0 | 6.8 | heavy | R-H4 |
+| division-26-specifications | 3 | 124 | 21.4 | 0 | 6.9 | heavy | R-H2 |
+| eor-review-corrections | 9 | 94 | 18.3 | 0 | 14.0 | heavy | R-H1,H2,H3 |
+| foundation-strategy | 8 | 50 | 107.9 | 0 | 13.3 | heavy | R-H1,H2,H3 |
+| frame-extension-method | 9 | 35 | 63.4 | 0 | 13.2 | heavy | R-H1,H2,H3＋run 佐證 |
+| heat-rejection-life-cycle-cost | 5 | 50 | 78.7 | 0 | 20.9 | heavy | R-H1,H2,H3 |
+| lv-cable-sizing | 6 | 32 | 3.6 | 0 | 14.3 | heavy | R-H1,H3 |
+| mv-conveyance-study | 4 | 66 | 27.9 | 0 | 10.0 | heavy | R-H1,H2,H3 |
+| roof-deck-design | 5 | 31 | 4.3 | 0 | 10.5 | heavy | R-H1,H3 |
+| seismic-diaphragm-shear | 6 | 40 | 10.1 | 0 | 6.1 | heavy | R-H1,H2 |
+| wind-diaphragm-shear | 6 | 37 | 3.6 | 0 | 8.0 | heavy | R-H1,H3 |
+
+計：light 14（其中 12 為 MCP world-export memo 題）／heavy 14／uncertain 1。
+
+預估成本（strata 單題串行）：light quick 15–45 min／題（build ~1 min＋agent ≤ QUICK_SEC＋judge）；heavy main 2–4 h／題（frame-extension 實測 3 h 58 m）。
+
+建議實驗組合（等同意，見 §1 下一個可執行任務）：EXP-015 quick＝`fire-test-validation-memo`（L2，純檔案）、`emergency-spillway-check`（L1，MCP×8，同時實戰驗證 P1-07）、`engineers-estimate-check`（L1，電機域）＋探測 `data-center-site-model`；EXP-016 main＝`roof-deck-design`＋`eor-review-corrections`（`frame-extension-method` 已有基線 0.3617 充當第三代表，不重跑）。
 
