@@ -18,17 +18,21 @@
    deliverable, its path and format, and how to verify it.
 2. The worker executes the task using the plan; its answer becomes the final
    message.
-3. The verifier starts with a fresh conversation containing only the task, the
-   plan, and the worker's summary. It inspects the deliverables and replies
-   `PASS` or lists specific gaps, which are sent back to the worker for up to
-   `MAX_FIX_ROUNDS` rounds while sufficient time remains.
+3. The gate role turns the task's hard requirements into a mechanical
+   Python acceptance check -- required files at their exact paths, table
+   headers and column order, value formats, ordering rules, counts and
+   cheap recomputations. The harness compiles it, runs it in the task
+   container and sends its `FAIL` lines back to the worker for up to
+   `MAX_FIX_ROUNDS` rounds while sufficient time remains. For any round
+   with no usable check, the verifier instead inspects the deliverables
+   by hand and replies `PASS` or lists specific gaps.
 
-The planner and verifier receive only `bash` and `read_file` and are instructed
-not to modify any files.
+The planner, gate and verifier receive only `bash` and `read_file` and are
+instructed not to modify any files.
 
-When the task message names MCP servers, all three roles also receive
-`mcp_list` and `mcp_call`, which reach those servers through the evaluator's
-in-container `http` request ([`docs/protocol.md`](../docs/protocol.md)).
+When the task message names MCP servers, every role also receives `mcp_list`
+and `mcp_call`, which reach those servers through the evaluator's in-container
+`http` request ([`docs/protocol.md`](../docs/protocol.md)).
 """
 
 import asyncio
@@ -69,6 +73,18 @@ CONTEXT_FULL = re.compile(
     re.I,
 )
 CUT_KEEP = 1000  # characters a tool result keeps once the context is full
+# DEF-003: a proactive context budget. $CONTEXT_TOKENS is the endpoint's
+# window (0: unknown -- keep only the reactive post-400 cut). The local
+# Strata run sets its own value and the declared model another, so it is
+# never a constant here. A call goes out only once the conversation plus
+# its reply budget fits the window minus $CTX_MARGIN_TOKENS; long old tool
+# results are shortened before the call instead of the endpoint answering
+# 400 and recover() cutting after the fact.
+CONTEXT_TOKENS = int(os.environ.get("CONTEXT_TOKENS", "0"))
+CTX_MARGIN = int(os.environ.get("CTX_MARGIN_TOKENS", "8000"))
+# never shrink the reply budget below this, even if the conversation alone
+# no longer fits: let the reactive path handle it
+CTX_MIN_ANSWER = 1024
 # times in a row an empty or cut-off reply gets a "continue" before the run
 # stops
 MAX_NUDGES = 3
@@ -88,6 +104,12 @@ CHECK_SHARE = 0.25
 # wrap-up
 MIN_STEP_SEC = 120
 MAX_FIX_ROUNDS = 2
+# P3 mechanical acceptance check: where the gate script runs in the task
+# container, and how much of its output reaches the worker as gaps.
+GATE_PATH = "/tmp/ple_gate.py"
+GATE_MAX_FAILS = 30
+GATE_GAP_CHARS = 4000
+GATE_SCRIPT_CHARS = 60_000
 # The endpoint key the evaluator provides. Log lines are free text the
 # graders record, so anything logged passes through `safe`, which replaces
 # the key (asserted by the `redaction` case in tests/mock_contract_test.py).
@@ -128,6 +150,18 @@ engineer's summary of what was delivered. Open every deliverable with your tools
 it against the task: the path, the format, every part the task asks for, and the key numbers, recomputed. Do not \
 create or change any file. If everything holds, reply with the single word PASS and nothing else. Otherwise reply \
 with a numbered list of the gaps, each specific enough to fix."""
+
+GATE = """You turn an engineering task into a mechanical acceptance check that runs before the \
+delivery is accepted. The task and a plan follow; an engineer has already produced the files. Open the \
+deliverables with your tools (bash starts in {workdir}), but do not create or change any file under the \
+task folders (scratch files may live in /tmp). Reply with a single Python 3 script in one fenced code \
+block and nothing else. The script runs as `python3` inside the task container: it may read any task \
+file, write only under /tmp, prints one line per hard requirement the task states -- `PASS <id>` when it \
+holds, `FAIL <id>: <what is wrong, and in which file and row>` when it does not -- cheapest checks first, \
+and exits 0 either way. Cover every mechanically checkable requirement: each required file at its exact \
+path, table headers, column names and column order, value formats such as drawing-number and \
+revision-suffix rules, row and sheet ordering, required sections and counts. Recompute a number only \
+where the inputs are cheap to read; leave judgement calls out."""
 
 
 def tool(name, description, **params):
@@ -359,7 +393,22 @@ async def recover(session, messages, exc, waits, until):
   return True
 
 
-async def shorten(session, messages):
+def est_tokens(messages):
+  """Estimates how many prompt tokens `messages` will take (chars / 4).
+
+  A rough estimate; its only job is deciding when to shorten the
+  conversation before sending it.
+
+  Args:
+    messages: The conversation so far, in OpenAI chat format.
+
+  Returns:
+    The estimated prompt token count.
+  """
+  return len(json.dumps(messages, ensure_ascii=False)) // 4
+
+
+async def shorten(session, messages, tag="context full"):
   """Truncates the older half of long tool results to `CUT_KEEP` characters.
 
   Repeated calls truncate progressively newer results. Claude's thinking blocks
@@ -369,6 +418,8 @@ async def shorten(session, messages):
   Args:
     session: Active `taskbridge.Session` for the task.
     messages: The conversation, modified in place.
+    tag: Log line prefix naming the trigger ("context full" after a 400,
+      "context budget" before a call that would not fit).
 
   Returns:
     Whether any tool result was truncated.
@@ -386,8 +437,67 @@ async def shorten(session, messages):
         messages[n]["content"][:CUT_KEEP]
         + "\n[... cut to save context; run the tool again if needed]"
     )
-  await session.log(f"context full: cut {len(cut)} old tool results")
+  await session.log(f"{tag}: cut {len(cut)} old tool results")
   return True
+
+
+def gate_script(reply):
+  """Extracts the gate agent's Python acceptance check from its reply.
+
+  Takes the first fenced code block, or the whole reply when untagged.
+  The source is accepted only if it compiles and is a sane size, so the
+  harness never writes a truncated or prose answer into the container.
+
+  Args:
+    reply: The gate agent's final text.
+
+  Returns:
+    The script source, or None when no usable script was produced.
+  """
+  found = re.search(r"```(?:[Pp]ython\d*)?[^\S\n]*\n(.*?)```", reply, re.S)
+  body = (found.group(1) if found else reply).strip()
+  if not body or len(body) > GATE_SCRIPT_CHARS:
+    return None
+  try:
+    compile(body, "ple_gate", "exec")
+  except (SyntaxError, ValueError):
+    return None
+  return body
+
+
+async def gate_run(session, script):
+  """Runs the gate check inside the task container and reads its verdict.
+
+  Args:
+    session: Active `taskbridge.Session` connected to the task container.
+    script: Python source of the gate check.
+
+  Returns:
+    "PASS" when no printed line starts with FAIL, the FAIL lines (capped
+    to `GATE_MAX_FAILS` lines and `GATE_GAP_CHARS` characters) as the gap
+    list when some do, or None when the run printed no verdict lines.
+  """
+  try:
+    await session.write_file(GATE_PATH, script)
+    result = await session.exec(f"python3 {GATE_PATH}")
+  except taskbridge.TaskError as exc:
+    await session.log(safe(f"gate: run error ({str(exc)[:200]})"))
+    return None
+  lines = [ln.strip() for ln in (result["output"] or "").splitlines()]
+  fails = [ln for ln in lines if ln.upper().startswith("FAIL")]
+  passes = [ln for ln in lines if ln.upper().startswith("PASS")]
+  if not fails and not passes:
+    tail = " ".join(lines[-3:])[:200]
+    await session.log(
+        safe(
+            f"gate: no verdict lines (exit {result['exit_code']}:"
+            f" {tail})"
+        )
+    )
+    return None
+  if not fails:
+    return "PASS"
+  return "\n".join(fails[:GATE_MAX_FAILS])[:GATE_GAP_CHARS]
 
 
 def conversation(system, session, prompt):
@@ -479,6 +589,25 @@ async def agent(session, messages, tools, until, final=False):
       timeout = min(WRAP_UP_SEC, left)
     else:
       timeout = left - until
+    # DEF-003: with a known window ($CONTEXT_TOKENS), trim old tool
+    # results before sending so the conversation plus its reply budget
+    # fits; the reply budget itself shrinks to the room left. The
+    # reactive cut in recover() stays as the backstop for unknown or
+    # mis-declared windows.
+    max_out = MAX_OUTPUT_TOKENS
+    if CONTEXT_TOKENS:
+      room = CONTEXT_TOKENS - CTX_MARGIN - est_tokens(messages)
+      if room < 0:
+        await session.log(
+            f"context budget: over by {-room} tokens;"
+            " shortening old tool results"
+        )
+      while room < CTX_MIN_ANSWER:
+        if not await shorten(session, messages, tag="context budget"):
+          room = CTX_MIN_ANSWER  # bare conversation alone does not fit
+          break
+        room = CONTEXT_TOKENS - CTX_MARGIN - est_tokens(messages)
+      max_out = max(CTX_MIN_ANSWER, min(MAX_OUTPUT_TOKENS, room))
     try:
       reply = await asyncio.wait_for(
           client.chat.completions.create(
@@ -487,7 +616,7 @@ async def agent(session, messages, tools, until, final=False):
               tools=tools,
               tool_choice="none" if wrap_up else "auto",
               reasoning_effort=EFFORT,
-              max_completion_tokens=MAX_OUTPUT_TOKENS,
+              max_completion_tokens=max_out,
           ),
           timeout,
       )
@@ -557,7 +686,7 @@ async def agent(session, messages, tools, until, final=False):
 
 
 async def solve(session):
-  """Executes the planner, worker, and verifier loop for `session`.
+  """Runs planner, worker, and the gate-checked fix loop for `session`.
 
   Args:
     session: Active `taskbridge.Session` for the task.
@@ -609,21 +738,44 @@ async def solve(session):
   summary = await agent(
       session, work, TOOLS + extra, until(CHECK_SHARE), final=True
   )
+  # P3: the acceptance check is mechanical. It is written once by the gate
+  # role and rerun every round; only when no usable check exists does the
+  # read-only verifier check by hand for that round.
+  check_script = None
   for round_num in range(1, MAX_FIX_ROUNDS + 1):
     if not time_for(until(CHECK_SHARE / 2)):
       break
-    await session.log(f"phase: verify {round_num}")
-    review = (
-        f"## Task\n{task}\n\n## Plan\n{plan}\n\n## The engineer's"
-        f" summary\n{summary}"
+    await session.log(f"phase: gate {round_num}")
+    if check_script is None and time_for(until(CHECK_SHARE / 4)):
+      check_script = gate_script(await agent(
+          session,
+          conversation(GATE, session, f"## Task\n{task}\n\n## Plan\n{plan}"),
+          READ_ONLY + extra,
+          until(CHECK_SHARE / 2),
+      ))
+      await session.log(
+          "gate: script ready" if check_script else "gate: no usable script"
+      )
+    verdict = (
+        await gate_run(session, check_script) if check_script else None
     )
-    verdict = await agent(
-        session,
-        conversation(VERIFIER, session, review),
-        READ_ONLY + extra,
-        until(CHECK_SHARE / 2),
-    )
-    await session.log(safe(f"verifier: {verdict[:1000]}"))
+    if verdict is None:
+      if check_script is not None:
+        check_script = None  # a check naming no verdict lines is not rerun
+      if not time_for(until(CHECK_SHARE / 2)):
+        break
+      await session.log(f"phase: verify {round_num}")
+      review = (
+          f"## Task\n{task}\n\n## Plan\n{plan}\n\n## The engineer's"
+          f" summary\n{summary}"
+      )
+      verdict = await agent(
+          session,
+          conversation(VERIFIER, session, review),
+          READ_ONLY + extra,
+          until(CHECK_SHARE / 2),
+      )
+    await session.log(safe(f"verdict: {verdict[:1000]}"))
     # PASS alone in any letter case (Markdown emphasis and a full stop aside),
     # or an empty reply, names no gaps
     if verdict.strip("*_. \r\n\t").upper() in ("", "PASS") or not time_for(
@@ -635,8 +787,9 @@ async def solve(session):
         "role": "user",
         "content": (
             "A reviewer checked your files and found these"
-            f" gaps:\n{verdict}\n\nFix them, then reply with your updated"
-            " summary."
+            f" gaps:\n{verdict}\n\nClose every gap by writing or editing"
+            " the files with your tools -- rereading alone fixes nothing"
+            " -- then reply with your updated summary."
         ),
     })
     summary = (

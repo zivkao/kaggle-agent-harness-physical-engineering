@@ -5,11 +5,11 @@ Run from the harness folder:
   uv run --no-project --python 3.12 --with websockets,openai \
     python tests/mock_contract_test.py
 
-Ten scenarios assert the P1 exit conditions (bounded ends under faults)
-plus the protocol contract:
+Thirteen scenarios assert the P1 exit conditions (bounded ends under
+faults) plus the protocol contract:
 
-  clean         scripted plan/work/verify PASS  -> done, phases logged
-  fix_round     verifier lists gaps once        -> fix 1, verify 2, done
+  clean         scripted plan/work/gate PASS    -> done, phases logged
+  fix_round     scripted check lists a gap once -> fix 1, gate 2, done
   retry_429     six 429s, then health           -> recovered, done
   retry_dead    every call 400 (no retry fit)   -> error frame, bounded
   timeout_wrap  slow model, 6 s task clock      -> done before 12 s
@@ -18,6 +18,9 @@ plus the protocol contract:
   cancel        cancel mid-work                 -> done within 10 s
   socket_close  socket dropped mid-work         -> server survives, rerun
   redaction     key inside an error body        -> key never in any log
+  gate_fallback gate emits no usable script     -> reviewer takes the round
+  gate_exec     check prints no verdict lines   -> reviewer takes the round
+  ctx_budget    tiny $CONTEXT_TOKENS window     -> results cut before call
 """
 
 import asyncio
@@ -47,6 +50,8 @@ class MockModel(BaseHTTPRequestHandler):
     system = str((messages or [{}])[0].get("content", ""))
     if system.startswith("You check"):
       return "verifier"
+    if system.startswith("You turn"):
+      return "gate"
     if system.startswith("You are an expert"):
       return "worker"
     return "planner"
@@ -83,6 +88,13 @@ class MockModel(BaseHTTPRequestHandler):
             "write_file", {"path": "/app/out.txt", "content": "hi\n"}
         )
       return {"role": "assistant", "content": "summary: /app/out.txt written"}
+    if role == "gate":
+      if case == "gate_fallback":  # prose instead of a script
+        return {"role": "assistant", "content": "I could not write a script"}
+      return {
+          "role": "assistant",
+          "content": "```python\nprint('PASS scripted-ok')\n```",
+      }
     # verifier
     if call == 1:
       return self.tool("bash", {"command": "cat /app/out.txt"})
@@ -163,6 +175,7 @@ class Evaluator:
     self.logs = []
     self.execs = []
     self.n_execs = 0
+    self.n_gate = 0  # mechanical-check runs (own counter, see below)
 
   async def handle(self, ws):
     """Runs one full exchange on `ws` and returns the terminal frame."""
@@ -193,7 +206,26 @@ class Evaluator:
         self.result = message
         return message
       if kind == "exec":
-        self.execs.append(message.get("command", ""))
+        cmd = message.get("command", "")
+        self.execs.append(cmd)
+        if "ple_gate.py" in cmd:
+          # the mechanical check runs on its own counter, scripted from
+          # gate_outs, so gate reruns never shift the fault injections
+          if self.cfg.get("gate_fail_exec"):
+            out = "Traceback (most recent call last):\n  crash (injected)"
+          else:
+            outs = self.cfg.get("gate_outs") or ["PASS scripted-ok"]
+            out = outs[min(self.n_gate, len(outs) - 1)]
+          self.n_gate += 1
+          await ws.send(json.dumps({
+              "type": "result",
+              "id": message["id"],
+              "exit_code": 1 if self.cfg.get("gate_fail_exec") else 0,
+              "output": out,
+              "truncated": False,
+              "timed_out": False,
+          }))
+          continue
         self.n_execs += 1
         big = self.cfg.get("exec_output_chars", 4)
         await ws.send(json.dumps({
@@ -328,14 +360,36 @@ def check(ev, *, name, result_type="done", final_in=(), log_in=(),
 async def main():
   # clean: the scripted full loop completes with all phase markers
   ev, _ = await run_case("clean", {"MOCK_CASE": "clean"}, {})
-  check(ev, log_in=("phase: plan", "phase: work", "phase: verify 1"),
+  check(ev, log_in=("phase: plan", "phase: work", "phase: gate 1",
+                    "gate: script ready", "verdict: PASS"),
         final_in=("summary: /app/out.txt",), name="clean")
 
-  # fix_round: a gapped verdict sends the worker back once
-  ev, _ = await run_case("fix_round", {"MOCK_CASE": "fix_round"}, {})
+  # fix_round: the scripted mechanical check lists a gap once and the
+  # worker is sent back to write; the rerun of the same check passes
+  ev, _ = await run_case(
+      "fix_round",
+      {"MOCK_CASE": "fix_round"},
+      {"gate_outs": ["FAIL g1: out.txt needs a trailing newline",
+                     "PASS scripted-ok"]},
+  )
   assert MockModel.flags.get("saw_gap"), "fix_round: worker never got the gap"
-  check(ev, log_in=("phase: verify 1", "phase: fix 1", "phase: verify 2"),
-        final_in=("summary fixed",), name="fix_round")
+  check(ev, log_in=("phase: gate 1", "phase: fix 1", "phase: gate 2"),
+        log_not_in=("phase: verify",), final_in=("summary fixed",),
+        name="fix_round")
+
+  # gate_fallback: the gate answers prose; the read-only reviewer takes
+  # the round instead and passes
+  ev, _ = await run_case("gate_fallback", {"MOCK_CASE": "gate_fallback"}, {})
+  check(ev, log_in=("gate: no usable script", "phase: verify 1"),
+        final_in=("summary: /app/out.txt",), name="gate_fallback")
+
+  # gate_exec: the check runs but prints no verdict lines; the reviewer
+  # takes the round and the broken check is not rerun
+  ev, _ = await run_case("gate_exec", {"MOCK_CASE": "clean"},
+                         {"gate_fail_exec": True})
+  check(ev, log_in=("phase: gate 1", "gate: no verdict lines",
+                    "phase: verify 1"),
+        log_not_in=("phase: gate 2",), name="gate_exec")
 
   # retry_429: six 429s exhaust the SDK, recover() retries once more
   ev, _ = await run_case(
@@ -377,6 +431,17 @@ async def main():
       {"exec_output_chars": 30000},
   )
   check(ev, log_in=("context full: cut",), name="context_full")
+
+  # ctx_budget: with a tiny declared window, long old tool results are
+  # cut BEFORE the call and no 400 is ever answered
+  ev, _ = await run_case(
+      "ctx_budget",
+      {"MOCK_CASE": "clean", "CONTEXT_TOKENS": "1500",
+       "CTX_MARGIN_TOKENS": "100", "MAX_OUTPUT_TOKENS": "1000"},
+      {"exec_output_chars": 30000},
+  )
+  check(ev, log_in=("context budget: cut",),
+        log_not_in=("context full: cut",), name="ctx_budget")
 
   # cancel: done must arrive within the evaluator's 10 s window
   ev, _ = await run_case("cancel", {"MOCK_CASE": "cancel"},
