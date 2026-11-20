@@ -61,8 +61,8 @@
 
 ### 下一個可執行任務
 
-1. **待使用者決策（三項、互不阻擋）**：(a) **P3 起手＝hard-gate 自我驗證**——以「每個 item 的硬閘門全過」為第一目標（兩題 heavy 已證明 0.6 權重全歸零：EXP-016 register_hard forfeit、EXP-017 `hard_pass_rate` 0.0）；(b) **成本**——本地 Strata heavy 平均 3 h 52 m／題 → 14 題串行 ≈ 54 h，vs 付費 API（flash 單題實估 $0.2–0.4）多題並行一晚跑完 29 題（`JUDGE_*`／上游在 `model_proxy/config.yaml` 切換、不動 `submission.yaml`）；(c) **下一題候選**——`roof-deck-design`（heavy／checks／D=5，原 EXP-016 提案、尚未跑）或 `data-hall-mep-routing`（heavy／R-H4：交付物須由 script 產出 IFC4）。
-2. **DEF-003 修法待核准**（見 §7）：main `serve.py` 的上下文預算管理——事前守門（≤ n_ctx − 安全邊際）取代事後 cut、舊 tool 結果摘要化、收尾前預留 headroom。未核准前 main 碼維持 `eb918d8` 不動；參數不得綁死在 262,144（本機 Strata 常數，正式模型視窗不同）。
+1. **（2026-11-21 使用者已拍板）P3 起手＝hard-gate 自我驗證**：動 main `serve.py`，讓收尾階段的驗證從「讀檔重查」改成「對 instruction／templates 的逐條硬性要求做機械式自查（欄位／schema／圖號 revision-suffix／ordering／必要檔清單），以精簡 pass／fail 回饋驅動有寫入的 fix round」。**成本通道＝維持本機 Strata 串行**（不換付費 API；重開機可能切斷 run，故每 run 都要留 `.start`＋可重跑紀錄）。**quick 繼續暫停**（DEF-002 live 重測仍是復活第一件事）。DEF-003（上下文预算）不單獨先行，但在 P3 實作時必須一併考慮：新增的自我驗證輪正是 EXP-017 頂到 262,144 時被吃掉的那一轮，設計上要做成低上下文成本（容器內 script 自查、回傳精簡結果），否則會與 DEF-003 互相放大。
+2. **DEF-003 修法（未單獨先行；與 P3 合併設計）**（見 §7）：main `serve.py` 的上下文預算管理——事前守門（≤ n_ctx − 安全邊際）取代事後 cut、舊 tool 結果摘要化、收尾前預留 headroom。未核准前 main 碼維持 `eb918d8` 不動；參數不得綁死在 262,144（本機 Strata 常數，正式模型視窗不同）。
 3. **quick 維持暫停**（使用者指示不變）：EXP-015 #1/#2/#3、uncertain 探測全部暫止；DEF-002 的 live 重測（`DELIVERABLE_PATHS=/app/files/` 同參單次）列為 quick 復活時的第一件事。
 4. **ADR-010 revisit**（待使用者決策）：light 題 zero-deliverable 條件已成立；quick 存廢隨 DEF-002 live 重測結果一併決定。
 5. **正式 artifacts 需由宣告模型產生**（見 R-012，不變）：提交前要將 proxy 上游換回真的 Vertex `claude-opus-5-5`（目前該 project 的 `aiplatform` API 為 DISABLED，需先開通）。
