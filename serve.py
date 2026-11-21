@@ -23,6 +23,9 @@
    headers and column order, value formats, ordering rules, counts --
    and recomputes the worker's calculation ledger (`/tmp/ple_ledger.tsv`)
    from its sources instead of rereading stated figures (P3-01/P3-02).
+   It also audits the assumptions ledger (`/tmp/ple_assumptions.tsv`):
+   each judgement's citation must check out in the source and each
+   recorded duty must be stated in the deliverable (P3-03/P3-04).
    The harness compiles it, runs it in the task
    container and sends its `FAIL` lines back to the worker for up to
    `MAX_FIX_ROUNDS` rounds while sufficient time remains. For any round
@@ -146,7 +149,11 @@ act inside it, and bash starts in {workdir}. A plan for the task follows it; use
 show it is wrong. Compute with code, not by hand. Keep a calculation ledger: each time you derive a figure the \
 task's files imply rather than state, append one tab-separated line to `/tmp/ple_ledger.tsv` -- id, deliverable \
 path, value, source files, formula -- converting units inside the computing code (in/ft, CF/CY, LF) and rounding \
-only where the task says to. Write each deliverable exactly where and in the format the task \
+only where the task says to. Keep an assumptions ledger too: for every judgement of what the files mean (which \
+item a change belongs to, which quantity convention applies) and for every duty, acceptance or decision a cited \
+source states that the deliverable must reflect, append one tab-separated line to `/tmp/ple_assumptions.tsv` -- \
+statement, exact source citation (file, and sheet, row or section), the alternative reading considered, and why \
+this one was chosen. Write each deliverable exactly where and in the format the task \
 asks, then open it again to check it. When you are done, reply without calling a tool: a short summary of each \
 deliverable, where it is, and the key results."""
 
@@ -171,7 +178,11 @@ value, source files, formula). If it exists your script must read every row and 
 from its source files -- inputs read fresh, units converted in the code -- printing `PASS <id>` only \
 when the recomputed value matches what the deliverables state, else `FAIL <id>: stated <X> but \
 recomputed <Y> from <source>`; key derived figures stated without a ledger row get the same \
-treatment. Never credit a figure for appearing in two files. Leave judgement calls out."""
+treatment. Check `/tmp/ple_assumptions.tsv` too if present: for each recorded judgement verify its \
+citation actually says that in the source, and for each recorded duty or accepted fact verify the \
+deliverable states it -- `FAIL A<id>: <duty or choice, with its source citation> is not stated or \
+not supported` names the file at fault. Never credit a figure for appearing in two files. Leave \
+purely stylistic preferences out."""
 
 
 def tool(name, description, **params):
