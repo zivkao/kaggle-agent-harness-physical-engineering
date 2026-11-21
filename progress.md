@@ -1,9 +1,9 @@
 # PLE Solo Harness — Progress
 
 最後更新：2026-11-21  
-目前階段：`P2 — Baseline Agent Loop（已開工）`  
-整體狀態：`P2_IN_PROGRESS_P3_HEADSTART_LANDED — EXP-018 #2 0.130435 交付（新 gate 碼 live 首戰綠）；EXP-019 進行中；P2-05 四領域 3/4`
-完成度：`規劃 100% / 實作 25% / 官方驗證 65%`
+目前階段：`P3 — 工程驗證核心（提前開工；P2 已 DONE）`  
+整體狀態：`P2_DONE_P3_IN_PROGRESS — EXP-019 0.8378 → P2-05 4/4、P2-06 scorecard 落地（docs/P2_SCORECARD.md）；下一步 P3-01/02 計算 ledger`
+完成度：`規劃 100% / 實作 36%（階段任務 20/56：P0 7/8＋P1 7/7＋P2 6/6）/ 官方驗證 70%（kit check 7/7 已過，kit artifacts／final check 待 P8）`
 
 > 本文件是唯一進度真相來源。任務只有附上可重現的驗證證據後才可標記完成。
 
@@ -66,6 +66,12 @@
 - ④ **操作教訓（重現性）**：LiteLLM 必須綁 **0.0.0.0**——harness egress sidecar 在容器內走 `host.docker.internal:4000`→`172.17.0.1`，loopback-only 綁定讓 `model` 階段 FAIL（本次第一次 kit check 死因）；啟動需 `uv run --with "litellm[proxy]" --with websockets`（新版 litellm 純 `litellm` 缺 fastapi／websockets）；`pkill`/`pgrep -f` 的模式會命中工具 wrapper 自己的 command line（兩度 exit 144 自我終止）→ 啟停改放腳本 `/tmp/start_litellm.sh`（模式只存在腳本內）。
 - ⑤ **P2 正式開工**（使用者指示「依 progress.md 逐項完成，主要目標進入第二階段」）：P2-01～P2-04 已補上可重現證據（見 §3）；P2-05 四領域已 2/4（structural×2）→ 補 **EXP-018 `engineers-estimate-check`（電機, light L1, MCP×8）**＝新 gate 碼首戰＋main 路徑 MCP 實戰、**EXP-019 `emergency-spillway-check`（水資源, light L1, MCP×8）**排隊（串行，發射前另立 `.start`）。
 
+**2026-11-21（十六）— EXP-019 完成 0.8378 → P2-05 達 4/4 → P2 全階段收尾（P2-06 scorecard 落地）：**
+- ① **EXP-019**：**0.837838／`ok`／4,270 s／143 呼叫**，capture＝`Memo_to_Callaway_Spillway_2026-10-31.docx` 55,494 B；rubric 加權 31/37（13/15 items）；2 條未過皆工程推導／義務歸屬類（1.29 ft freeboard overflow 不合格、curb＆gutter 改善接受義務）。gate 碼第二次 live＝再现 `gate: script ready`→`verdict: PASS`（fix 0 輪）；尾聲 0 錯誤；cache 命中 97.4%。
+- ② **MCP 觀察定案（非缺陷）**：兩題 MCP×8 light 題，目錄快取（141／144 tools）與 HTTP 皆正常，但模型 **0 次** `mcp_list`/`mcp_call`——答案全在檔案系統。meta 工具在位待 world-export 題（MCP×13）才是真正的功能性考驗。
+- ③ **P2-06 完成**：`docs/P2_SCORECARD.md`＝四題 scorecard（0.3673／0.2573／0.1304／0.8378，均值 0.3982）＋量化 failure taxonomy（main 線 ARTIFACT 族 0/4；heavy＝HARD_GATE 歸零族；light rubric＝CALCULATION 族）＋五條結構性結論＋P3 直接輸入。§4 dashboard 首次填值（artifact 100%、zero 0%、cost band、cache 92–97%）。
+- ④ **P2 階段：DONE 6/6。** 下一步＝P3-01/02（單位正規化＋計算 ledger＝直打 018 型 40/46 點數值丟分）；heavy 對照 run 建議帶 `CONTEXT_TOKENS=262144`（僅 dev）做 DEF-003 live 驗證。
+
 **2026-11-21（十四）— EXP-018 #2 完成＝新 gate 碼首戰成功交付（0.130435）；EXP-019 發射：**
 - ① **交付與評分**：capture `files=1`（`Memo_to_Callaway_2026-10-31.docx` 43 KB）、**0.130435／`ok`／2,497 s／70 呼叫**（本機 rubric judge；10 items、加權 6/46）。丟分全在 4 條高權重 ground-truth 數值（bond／Sec2 小計算錯＝CALCULATION 族），格式／路徑／段落類全過——正是 P3-02（計算／假設／證據 ledger）的靶心。
 - ② **新碼判準結果**：`phase: plan→work→gate 1`＋`gate: script ready`→`/tmp/ple_gate.py`（11,812 B）執行→`verdict: PASS`（fix 0 輪）＝P3 起手碼首次 live 生效；模型並先在 `/tmp/acc` 對自寫驗收腳本跑 3 組突變測試（錯 bond／缺日期／刪列→對應 FAIL 線如預期）＝偵測力自證。DEF-003 尾聲乾淨（0 筆 4xx/5xx、無 cut；本題 context 小，事前守門仍未 live 驗證）。**唯一未達：MCP `mcp_list`/`mcp_call` 0 次使用**（目錄快取 144 tools 正常在位）——meta 工具可用但本題模型不需要，EXP-019（MCP×8）再驗。
@@ -77,8 +83,9 @@
 
 ### 下一個可執行任務
 
-1. **盯 EXP-019（進行中，`exp019_1.start`）**：水資源 light L1、MCP×8；判準＝正常交付（capture≠{} ∧ score>0）＋gate 標記再現＋**MCP `mcp_list`/`mcp_call` 能否出現首次使用**＋尾聲無 DEF-003 型 400。完成 → **P2-05 4/4**。
-2. **P2-06 baseline scorecard 與 failure taxonomy**：EXP-019 後彙整四題（0.3673／0.2573／0.130435／EXP-019）依 domain／deliverable／grader 分欄＋hard-gate／rubric 失分結構（含 EXP-018 的 CALCULATION 族與 gate 首戰經驗）；DEF-003 啟用與否在此評估（EXP-018 未觸發，heavy 題尾聲才是測試場）。
+1. **P3-02 計算／假設／證據 ledger（＋P3-01 單位正規化）**：把「交付數字←來源＋公式＋中間值」變成人人必須產出、gate 逐條重算的物件——直打 EXP-018 型 40/46 點的 CALCULATION 族與 heavy 題 hard-gate 歸零族（見 `docs/P2_SCORECARD.md` §5）。實作＝main、單變因、mock 先紅後綠＋`kit check`。
+2. **DEF-003 live 驗證**：下一個 heavy 對照 run 帶 `CONTEXT_TOKENS=262144`（僅 dev，不綁宣告模型；R-009），對照 EXP-016/017 尾聲 400 是否消失、收尾自我驗證輪是否保住。
+3. **P3-05 A/B 錨點已立**：0.3673／0.2573（heavy structural，`eb918d8`）＋0.1304／0.8378（light rubric，`85d1cbd`）＝P3 每項改動的同題同參對照基準。
 3. **quick 維持暫停**（使用者指示不變）：EXP-015 #1/#2/#3、uncertain 探測全部暫止；DEF-002 的 live 重測（`DELIVERABLE_PATHS=/app/files/` 同參單次）列為 quick 復活時的第一件事。
 4. **正式 artifacts 需由宣告模型產生**（見 R-012，不變）：提交前要將 proxy 上游換回真的 Vertex `claude-opus-5-5`（目前該 project 的 `aiplatform` API 為 DISABLED，需先開通）。
 
@@ -97,8 +104,8 @@
 |---|---|---:|---:|---|
 | P0 環境與規格 | 11/16–11/19 | **DONE** | 7/8 | 僅 P0-01（Kaggle 身分驗證）未完成，由 R-001 追蹤，不阻擋開發 |
 | P1 最小合法 Harness | 11/20 | **DONE** | 7/7 | contract 注入 10/10（429/500/timeout/tool error/斷線有界；cancel≤8 s）；`kit check` 7 階段全 PASS（EXP-014，映像 `9b27c95b`） |
-| P2 Baseline Agent Loop | 11/24–11/29 | **IN_PROGRESS** | 4/6 | 2026-11-21 使用者拍板開工；P2-01～04 證據見 §3（starter 迴路＋`85d1cbd` gate／DEF-003＋mock 13/13＋kitcheck6 7/7）；P2-05 3/4（EXP-016／017 structural、EXP-018 #2 電機 0.130435＝新碼首戰綠；#1 重開機 INVALID），EXP-019 進行中＝水資源；P2-06 待 P2-05 |
-| P3 工程驗證核心 | 11/30–12/06 | BACKLOG | 0/5 | — |
+| P2 Baseline Agent Loop | 11/21 完成（提前 3 天） | **DONE** | 6/6 | P2-05 4/4：0.3673／0.2573（structural heavy）、0.1304（electrical）、0.8378（water），全部交付成功；P2-06＝`docs/P2_SCORECARD.md`（taxonomy 六族＋結論＋P3 輸入） |
+| P3 工程驗證核心 | 11/30–12/06 | **IN_PROGRESS**（提前開工） | 0/5 | 起手已落（`85d1cbd` gate＋DEF-003 守門、kitcheck6 7/7、兩次 live verdict PASS）；P3-01/02 計算 ledger 為下一變因 |
 | P4 多格式工具能力 | 12/07–12/13 | BACKLOG | 0/5 | — |
 | P5 完整 Dev Set/回歸 | 12/14–12/20 | BACKLOG | 0/6 | — |
 | P6 最佳化/模型選擇 | 12/21–12/27 | BACKLOG | 0/5 | — |
@@ -164,8 +171,8 @@
 - [x] `P2-02` TaskSpec/deliverable/hard-gate 抽取。
 - [x] `P2-03` planning/execution/context loop。
 - [x] `P2-04` preflight verifier 與 bounded repair。
-- [ ] `P2-05` 四領域代表題 run（3/4：structural×2 已分數化；電機＝EXP-018 #2 **0.130435** 交付（#1 重開機 INVALID）；水資源＝EXP-019 進行中）。
-- [ ] `P2-06` baseline scorecard 與 failure taxonomy（待 P2-05 完成後彙整）。
+- [x] `P2-05` 四領域代表題 run（4/4：structural×2（0.3673／0.2573）、電機＝EXP-018 #2 **0.130435**（#1 重開機 INVALID）、水資源＝EXP-019 **0.837838**；全四題 capture≠{}、`ok`）。
+- [x] `P2-06` baseline scorecard 與 failure taxonomy：`docs/P2_SCORECARD.md`（四題分欄表、均值 0.3982、六族量化 taxonomy、五條結論、P3 輸入）。
 
 驗證證據：
 
@@ -245,14 +252,14 @@
 
 ## 4. Quality dashboard
 
-尚未建立 baseline，所有數值先標 `N/A`。
+四題代表 baseline 已建（`docs/P2_SCORECARD.md`，2026-11-21）；29 題 dev mean 待 P5-01。
 
 | 指標 | Baseline | Current | Release target |
 |---|---:|---:|---:|
-| Dev mean score | N/A | N/A | 高於 starter，且無重大領域退步 |
-| Hard-gate pass rate | N/A | N/A | 持續上升 |
-| Zero-score rate | N/A | N/A | 低於 baseline |
-| Artifact-producing rate | N/A | N/A | >= 95% |
+| Dev mean score | N/A（29 題未跑） | 0.3982（4 題代表） | 高於 starter，且無重大領域退步 |
+| Hard-gate pass rate | heavy 兩題全未全過（016 B8／017 hard_pass 0） | 同左＝P3-03 靶心 | 持續上升 |
+| Zero-score rate | main 線 0/4＝0% | 0% | 低於 baseline |
+| Artifact-producing rate | main 線 4/4＝100% | 100%（quick 線暫停不計） | >= 95% |
 | 3-run score std | N/A | N/A | <= 0.05 或較 baseline -30% |
 | Boot success | N/A | N/A | 100/100 |
 | Controlled mock completion | N/A | N/A | >= 99% |
@@ -302,7 +309,7 @@
 | EXP-017 | 2026-11-20 | 同 EXP-016（main `5763d7a`＝碼 `eb918d8`、無參數改動、`--no-export`、全路由本機 Strata；`exp017_1.start`；15:54 發射，run `plan-verify-20261120-155459`、job `eor-review-corrections__WW9x2d7`） | `eor-review-corrections`（checks-judge，交付＝`/filesystem/dc_structural__eor_revision__blind/output/submission.zip`） | main dev 子集 2/2：另一交付／評分型態（judge 於本機 proxy 同一 Strata） | **INVALID——使用中斷**：17:36 使用者要求重開機，發射後 1 h 41 m 時以 TERM→KILL 停止 eval 程序組（655096/655099）；**無 verifier／grade 產出＝無分數**；部分軌跡保留（transcript 250 行、結束行 `serve stop condition: cancelled (timeout)`、`agent/{plan-verify.txt,serve.log,trajectory.json,egress.log}` 在盤上）；run 目錄與 `.start` 記錄保留（同 EXP-013 首次被 distro 重啟切斷的處理模式）；試題容器＋滯留的 EXP-015 verifier 容器（含 sidecar）已全部 `docker rm -f` | 依「服務性中斷可同參重跑一次、保留原 run＋原因」：**重開機後以完全相同指令單次重跑＝EXP-017 #2**（發射前重驗 proxy／Strata／docker／disk＋`set -a; . ~/projects/local.env; set +a`），此重跑屬事前授權的例外，非加碼 |
 | EXP-017 #2 | 2026-11-20 | 同 EXP-016 設定：main HEAD `c4af94e`（serve.py／taskbridge／submission.yaml 碼＝`eb918d8`、`git diff 5763d7a` 空）、無參數改動、`--no-export`、全路由本機 Strata；`exp017_2.start`；17:52:37 發射（真 pid 880018）、run `plan-verify-20261120-175344`、映像 `plebench-serve:50076b9de1b68fed`、job `eor-review-corrections__Bzs62np` | `eor-review-corrections`（checks-judge；artifacts 宣告兩路徑，主＝`/filesystem/dc_structural__eor_revision__blind/output/submission.zip`） | EXP-017 之同參單次重跑（#1 因使用者重開機＝服務性中斷而 INVALID）；模型／prompt／工具／上限全部零變動 | **score 0.2573／reward 0.2573／`ok`／17,053 s（4 h 44 m）**；`serve_status=completed`、`serve stop condition: done`、340 次模型請求；capture `files=1`＝`submission.zip` 23,890 B（7 檔）；評分 rule `0.4 p + 0.6 [h=1] O'`：34 items、`mean_p` 0.6431／`mean_p_squared` 0.4341、register 48 列 precision 1.0／recall_hard 0.882／recall_all 0.933／wrong 0、`parseable_rate` 1.0，**`hard_pass_rate` 0.0／`full_compliance_rate` 0.0／`mean_O`=`mean_O'`=`mean_gated_O'`＝0** ⇒ 0.6 權重全失、score＝0.4×mean_p；BP-2 0.1019／BP-3 0.2375；judge 1 呼叫 ok | in 30,583,152／cache 28,888,327（94.5%）／out 466,255；17:52:37→22:39:31；family：0＝F03、F12、F15、S08、D3；0.529＝F06、F08、F09、F10、S04–S07；部分＝F01 0.824、F02 0.794、S03 0.794、F04 0.735、S01 0.735；1.0＝F05、F07、F11、F13、F14、F16、S02、D1、D2、J1–J3；notes：`F08_added want [M-502A,S-201A] got [M-503,S-202]`、`F10_first8` GI-002 在 GI-001 前；DEF-003 尾聲 400（262,159＞262,144、在 summary 之後）＋`context full: cut` 5 次；雙 artifact 路徑變體缺失→Harbor `docker compose cp` rc=1（不影響評分） | **main dev 子集 2/2 完成：兩題 heavy 均成功交付＋非零分（0.3673／0.2573）**；跨題失分結構＝hard gate 未全過 → 0.6 客觀分歸零（P3 最大槓桿、佐證 ADR-002）；heavy 平均 3 h 52 m／題 ⇒ 14 題串行 ≈ 54 h（成本決策升級）；新增 DEF-003 |
 | EXP-018 | 2026-11-21 | main HEAD `85d1cbd`（P3 起手：gate 機械驗收＋DEF-003 事前守門；`kitcheck6.log` 7 階段全 PASS，映像 `plebench-serve:6fb67fa48bbb4548`）、starter 預設預算、`CONTEXT_TOKENS` 未設（保守：首波只走事後路徑）、`--no-export`、全路由本機 Strata；`exp018_1.start`；03:55:22 發射（真 python pid 6891） | `engineers-estimate-check`（light L1，§13；MCP×8；電機域） | P2-05 第三領域（電機）＋新 gate 碼首個 live run＋main 路徑 MCP 實戰；通過判準＝capture≠{} ∧ score>0 ∧ 轉錄見 `phase: gate`/`verdict:`/fix 有寫入 ∧ MCP 可用 ∧ 尾聲無 DEF-003 型 400 | **INVALID——服務性中斷**：trial 04:21:18 開跑（verifier 映像建置 26 分鐘完成）、~08:33 使用者機器重開機（容器 `Exited(255)`、WSL uptime 2 分鐘佐證）＝跑了 ~4 h 12 m 被切斷、**無 grade**；`result.json` 凍結 `n_running_trials=1／finished_at=null`、`agent/`／`verifier/` 空目錄（硬重開機無轉錄落盤）；原 run＋`.start` 保留 | run dir `plan-verify-20261121-035518`；發射時 docker 0 殘留、disk 933G、RAM 60G；觀察點見 `.start` | 依規則**同參單次重跑＝EXP-018 #2**（事前授權例外、非加碼；見 §1（十三）） |
-| EXP-019 | 2026-11-21 | 碼＝`85d1cbd`（HEAD docs-only 之後；`git diff 85d1cbd` 於四核心檔空）、starter 預設預算、`CONTEXT_TOKENS` 未設、`--no-export`、全路由本機 Strata；`exp019_1.start`；10:06:31 發射（真 python pid 59266） | `emergency-spillway-check`（light L1，§13；MCP×8；水資源域） | P2-05 第四領域（水資源）＋gate 碼第二次 live＋**MCP meta 工具首次實戰機會**（EXP-018 目錄快取正常但 0 次使用）；通過判準＝capture≠{} ∧ score>0 ∧ gate 標記再現 ∧ MCP 使用 ∧ 尾聲無 DEF-003 型 400 | 進行中 | run dir `plan-verify-20261121-100723`；發射前鏈路全 200、0 殘留容器、880G／60G | P2-05 4/4（待結果） |
+| EXP-019 | 2026-11-21 | 碼＝`85d1cbd`（HEAD docs-only 之後；`git diff 85d1cbd` 於四核心檔空）、starter 預設預算、`CONTEXT_TOKENS` 未設、`--no-export`、全路由本機 Strata；`exp019_1.start`；10:06:31 發射（真 python pid 59266） | `emergency-spillway-check`（light L1，§13；MCP×8；水資源域） | P2-05 第四領域（水資源）＋gate 碼第二次 live＋**MCP meta 工具首次實戰機會**（EXP-018 目錄快取正常但 0 次使用）；通過判準＝capture≠{} ∧ score>0 ∧ gate 標記再現 ∧ MCP 使用 ∧ 尾聲無 DEF-003 型 400 | **score 0.837838／reward 同／`ok`／4,270 s**；`done after 143 request(s)`、`serve status=completed`；capture `files=1`＝`Memo_to_Callaway_Spillway_2026-10-31.docx` 55,494 B。評分＝rubric 族 `passed_score`（加權）：15 items、13 過、**31.0/37.0**；2 條未過（各 3 點）皆**工程判斷／推導類**：未指出 1.29 ft freeboard 在 spillway overflow 時不合格、未寫 curb＆gutter 半段改善已被接受之義務歸屬 | run `plan-verify-20261121-100723`（job `__ReGYA7s`）；in 9,717,976／cache 9,465,260（**97.4%**）／out 136,834；watcher 無自癒事件 | **P2-05 4/4 完成**；gate 碼第二次 live＝再現 `phase: plan→work→gate 1`＋`gate: script ready`→`verdict: PASS`（fix 0 輪）；尾聲乾淨（0 錯誤、無 cut）；**MCP 仍 0 次使用**（目錄快取 `mcp apps: 141 tools`＋3 筆 HTTP 正常）＝連續兩題 meta 工具在位但模型不需要（答案在檔案系統）→ 記錄為觀察，非 harness 缺陷；四題彙整見 **P2-06 scorecard**（`docs/P2_SCORECARD.md`） |
 | EXP-018 #2 | 2026-11-21 | 與 #1 完全同參：HEAD `7211094`、`git diff 85d1cbd HEAD -- serve.py taskbridge.py submission.yaml requirements.txt` 空（碼＝kitcheck6 驗證的 `85d1cbd`）、build 重用（映像 `6fb67fa48bbb4548`）、`CONTEXT_TOKENS` 未設、`--no-export`、全路由本機 Strata；重開機後鏈路重驗全 PASS（Strata 200／LiteLLM 200＋e2e 200／docker 0 殘留／881G／61G）；`exp018_2.start`；09:14:17 發射（真 python pid 1338） | `engineers-estimate-check`（light L1；MCP×8；電機域） | #1 重開機 INVALID 之同參單次重跑；判準同 #1 | **score 0.130435／reward 同／`ok`／2,497 s（≈42 m）**；`done after 70 request(s)`、`serve status=completed`；capture `files=1`＝`Correspondence/Client/Memo_to_Callaway_2026-10-31.docx` 43,429 B。評分＝rubric 族 `portable_weighted_rubric_equivalent`（`score_key=passed_score`）：10 items、6 過、加權 **6.0/46.0**＝0.1304；4 條未過皆高權重（10 點：ground truth 要 bond $5,384,000／Sec2 小計 $1,303,717.70，模型算出 $5,431,000／$1,350,777.75＝**CALCULATION 族丟分**，judge＝本機 Strata、R-009 留意） | run `plan-verify-20261121-091517`（job `__38Tw76m`）；in 1,484,305／cache 1,369,664（92.3%）／out 78,158；watcher 無自癒事件 | **新 gate 碼首戰＝绿**：`phase: plan→work→gate 1`＋`gate: script ready`→寫 `/tmp/ple_gate.py`（11,812 B）容器執行→`verdict: PASS`（fix 0 輪；模型先於 `/tmp/acc` 對自寫腳本做 3 組突變測試證偵測力）；**DEF-003 尾聲乾淨**（egress 0 筆 4xx/5xx、無 cut；本題 context 小，未觸發＝未驗證）；**MCP 未實戰**：`mcp apps: 144 tools` 目錄快取在（initialize＋list_tools 3 筆 HTTP）但模型 **0 次 `mcp_list`/`mcp_call`**（本題檔案系統可解）→ EXP-019 再驗；P2-05 電機 ✓ → **3/4**；0.130 無歷史可比（本題首跑） |
 | EXP-006 | 2026-11-18 | `97cbd38`：serve.py 加 `mcp_list`／`mcp_call` 中繼工具（MCPClient 於 task 開始時 initialize＋list_tools 並快取；planner/worker/verifier 三角色皆可呼叫；輸出 clip、args 以 JSON字串傳遞） | 官方 `kit check`（含 `mcp` 階段） | 讓 harness 正式走協議的 `http` 請求存取任務 MCP server，消除 `[WARN] mcp` | 靜態驗證：AST ok、pyflakes 0、無新增 >80 char 行；**`kit check` 22:3x：`[PASS] mcp`（82 s、13 requests、13,814 in／1,211 out）、6 階段全 PASS、僅剩 `artifacts` WARN**；映像 `plebench-serve:b8a6572ec27dd14a`（`~/projects/kitcheck4.log`） | **P1-07 完成**；以補丁版重跑單題做分數對照（EXP-007） |
 | EXP-007 | 2026-11-18 | `97cbd38`（MCP 補丁版）、其餘同 EXP-005 | `frame-extension-method` 重跑 | 確認 MCP 補丁不降分、作為 P1 版對照 | **score 0.3557（`ok`，11,595 s＝3 h 13 m）**；tokens in 23,487,057／cache 23,086,775／out 320,314；與基線 0.3617 差 −0.006（−1.7%）。本題無 MCP server（`mcp_servers=[]`），補丁碼路徑為 no-op → 差異屬模型執行隨機性 | run `runs/plan-verify-20261118-224102/`；累計 proxy 543 呼叫 | **補丁定版**；單題單次跑的分數噪聲約 ±0.01，日後 A/B 需以多 run 或更大任務集對照 |
