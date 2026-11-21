@@ -48,3 +48,13 @@
 - P3-02（計算 ledger）：要求 agent 產出「每個交付數字 ← 來源檔＋公式＋中間值」的 ledger，gate 逐條重算；目標直打 CALCULATION 族。
 - P3-03（hard-gate／rubric evidence matrix）：017 型「每 item hard 旗未全過→權重歸零」需要 per-item 自我查核清單。
 - 對照基線：structural 兩題 0.3673／0.2573（`eb918d8`）與 rubric 兩題 0.1304／0.8378（`85d1cbd`）＝P3 改動的 A/B 錨點（同題同參、單變因）。
+
+### P3 A/B 第一樣本（2026-11-21）：計算 ledger（`6741308`）
+
+| 題 | 錨點（`85d1cbd`） | ledger（`6741308`） | Δ | 呼叫 | wall |
+|---|---:|---:|---:|---:|---:|
+| engineers-estimate-check | 0.130435 | **0.347826** | **+0.2174** | 70→92 | 2,497→3,951 s |
+
+- 判讀：丟分族由「**算錯／內部不一致**」位移到「**解讀／取值選擇與 GT 不同**」（headwall 歸類、curb inlet 計數、VF 深度 convention）。重算紀律已把可機械自洽的錯修掉（Sec2 一致性項轉過、bond 向 GT 收斂 $44k），剩下的不是算術問題。
+- 成本：+31% 呼叫、+58% wall、out 78k→137k。
+- 結論：ledger 碼保留；下一槓桿＝P3-03/04（假設矩陣＋一致性），直打「解讀選擇」族。heavy 側需先補 gate-only 錨（`eb918d8` heavy run 無 gate 碼）才能做 clean A/B。
