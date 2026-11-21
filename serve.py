@@ -20,8 +20,10 @@
    message.
 3. The gate role turns the task's hard requirements into a mechanical
    Python acceptance check -- required files at their exact paths, table
-   headers and column order, value formats, ordering rules, counts and
-   cheap recomputations. The harness compiles it, runs it in the task
+   headers and column order, value formats, ordering rules, counts --
+   and recomputes the worker's calculation ledger (`/tmp/ple_ledger.tsv`)
+   from its sources instead of rereading stated figures (P3-01/P3-02).
+   The harness compiles it, runs it in the task
    container and sends its `FAIL` lines back to the worker for up to
    `MAX_FIX_ROUNDS` rounds while sufficient time remains. For any round
    with no usable check, the verifier instead inspects the deliverables
@@ -141,7 +143,10 @@ to use, and how to check it."""
 
 WORKER = """You are an expert engineer working on a task in a Linux container with no internet access. Your tools \
 act inside it, and bash starts in {workdir}. A plan for the task follows it; use it, and correct it where the files \
-show it is wrong. Compute with code, not by hand. Write each deliverable exactly where and in the format the task \
+show it is wrong. Compute with code, not by hand. Keep a calculation ledger: each time you derive a figure the \
+task's files imply rather than state, append one tab-separated line to `/tmp/ple_ledger.tsv` -- id, deliverable \
+path, value, source files, formula -- converting units inside the computing code (in/ft, CF/CY, LF) and rounding \
+only where the task says to. Write each deliverable exactly where and in the format the task \
 asks, then open it again to check it. When you are done, reply without calling a tool: a short summary of each \
 deliverable, where it is, and the key results."""
 
@@ -160,8 +165,13 @@ file, write only under /tmp, prints one line per hard requirement the task state
 holds, `FAIL <id>: <what is wrong, and in which file and row>` when it does not -- cheapest checks first, \
 and exits 0 either way. Cover every mechanically checkable requirement: each required file at its exact \
 path, table headers, column names and column order, value formats such as drawing-number and \
-revision-suffix rules, row and sheet ordering, required sections and counts. Recompute a number only \
-where the inputs are cheap to read; leave judgement calls out."""
+revision-suffix rules, row and sheet ordering, required sections and counts. Recompute, never reread: \
+the engineer may leave `/tmp/ple_ledger.tsv` with one row per derived figure (id, deliverable path, \
+value, source files, formula). If it exists your script must read every row and recompute each value \
+from its source files -- inputs read fresh, units converted in the code -- printing `PASS <id>` only \
+when the recomputed value matches what the deliverables state, else `FAIL <id>: stated <X> but \
+recomputed <Y> from <source>`; key derived figures stated without a ledger row get the same \
+treatment. Never credit a figure for appearing in two files. Leave judgement calls out."""
 
 
 def tool(name, description, **params):
