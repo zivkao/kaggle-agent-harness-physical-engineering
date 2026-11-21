@@ -59,6 +59,8 @@
 
 - EXP-021 剩餘丟分（curb＆gutter 接受義務）與 EXP-020 剩餘三項同屬「**解讀／取值／義務陳述與 GT 不同**」，已非純算術——ledger 重算吃不到，需 P3-03/04。EXP-021 的 1.29 ft freeboard 推導項（EXP-019 曾丟）則被 ledger 版轉為 PASS。
 
+**方法學修正（2026-11-21 晚）**：engineers-estimate-check 三連跑（三種碼態各 n=1）＝0.130／0.348／0.109——rubric 題單次 A/B 的雜訊可達 ±0.2（一條 w10 翻轉＝0.217）。上表的 +0.217／+0.081 降階為方向性證據；rubric A/B 往後需 ≥2 樣本或 w3 細刻度題。EXP-022（assumptions ledger，engineers）0.109：機制有跑、`FAIL A`=0＝**self-audit 上限（B-5）**：引用核實確認不了抽取本身（14 EA 在 C-8 真有 14 行可引）。殘餘丟分分兩类：數量抽取錯誤（engineers）→ P3-04 獨立抽取交叉驗證；義務陳述（spillway）→ assumptions ledger 直靶（EXP-023 待跑）。
+
 - 判讀：丟分族由「**算錯／內部不一致**」位移到「**解讀／取值選擇與 GT 不同**」（headwall 歸類、curb inlet 計數、VF 深度 convention）。重算紀律已把可機械自洽的錯修掉（Sec2 一致性項轉過、bond 向 GT 收斂 $44k），剩下的不是算術問題。
 - 成本：+31% 呼叫、+58% wall、out 78k→137k。
 - 結論：ledger 碼保留；下一槓桿＝P3-03/04（假設矩陣＋一致性），直打「解讀選擇」族。heavy 側需先補 gate-only 錨（`eb918d8` heavy run 無 gate 碼）才能做 clean A/B。
