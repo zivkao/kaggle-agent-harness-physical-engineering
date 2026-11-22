@@ -105,6 +105,9 @@ MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "32000"))
 # it: a reasoning model can spend a whole reply budget thinking (EXP-024: one
 # 32K-token reply, all reasoning, half of a 64K window)
 OUT_SHARE = 4
+# a "length" reply this many tokens or more short of its budget was stopped by
+# the window (EXP-026: three 200 replies stopped at 65,535 tokens, asked 32K)
+CUT_SLACK = 16
 # sent after a reply that hit the output limit before it wrote any answer:
 # nothing of it reaches the conversation, so "continue where it stopped" would
 # point at text the model cannot see
@@ -510,29 +513,32 @@ async def window_probe(session):
   )
 
 
-async def learn_window(session, messages):
-  """Takes the size of a prompt the endpoint refused as the context window.
+async def learn_window(session, messages, generated=0, how="an overflow"):
+  """Takes the size of a conversation that hit the window as the window.
 
-  The endpoint said this conversation does not fit, so its window is at
-  most `est_tokens(messages)`. Keeping that as `CONTEXT_TOKENS` arms the
-  proactive budget for the rest of the task, so one overflow per serve
-  process replaces one per step (and per refilled context). The value is in
-  `est_tokens` units, which calibrates the chars/4 estimate to the real
-  tokenizer for free. A known window is only ever lowered: an overflow
-  under it means the estimate ran low.
+  Two signals reach here. A refused prompt (400): the window is at most
+  `est_tokens(messages)`. A reply the server stopped at the window rather
+  than at the reply budget (Ollama answers 200, `finish_reason` "length",
+  fewer tokens than asked): the window is the prompt plus the `generated`
+  tokens. Keeping that as `CONTEXT_TOKENS` arms the proactive budget for
+  the rest of the task, so one hit per serve process replaces one per step
+  (and per refilled context). The prompt part is in `est_tokens` units,
+  which calibrates the chars/4 estimate to the real tokenizer for free. A
+  known window is only ever lowered: a hit under it means the estimate ran
+  low.
 
   Args:
     session: Active `taskbridge.Session` for the task.
-    messages: The conversation the endpoint just refused, before shortening.
+    messages: The conversation sent, before shortening or the reply.
+    generated: Tokens the server produced before it stopped (0 for a 400).
+    how: What hit the window, for the log line.
   """
   global CONTEXT_TOKENS
-  seen = est_tokens(messages)
+  seen = est_tokens(messages) + generated
   if CONTEXT_TOKENS and seen >= CONTEXT_TOKENS:
     return
   CONTEXT_TOKENS = seen
-  await session.log(
-      f"context window: learned {seen} tokens from an overflow"
-  )
+  await session.log(f"context window: learned {seen} tokens from {how}")
 
 
 async def shorten(session, messages, tag="context full"):
@@ -784,6 +790,11 @@ async def agent(session, messages, tools, until, final=False):
         reply.choices[0].message,
         reply.choices[0].finish_reason == "length",
     )
+    # stopped short of the reply budget: the window, not the budget, ended it
+    # (Ollama keeps answering 200 there, so no 400 ever teaches recover())
+    made = reply.usage.completion_tokens if reply.usage else None
+    if cut and made is not None and made + CUT_SLACK < max_out:
+      await learn_window(session, messages, made, "a reply cut at the window")
     text = head + (message.content or "")
     if final and text:
       session.final_message = text
