@@ -5,7 +5,7 @@ Run from the harness folder:
   uv run --no-project --python 3.12 --with websockets,openai \
     python tests/mock_contract_test.py
 
-Thirteen scenarios assert the P1 exit conditions (bounded ends under
+Fourteen scenarios assert the P1 exit conditions (bounded ends under
 faults) plus the protocol contract:
 
   clean         scripted plan/work/gate PASS    -> done, phases logged
@@ -21,6 +21,7 @@ faults) plus the protocol contract:
   gate_fallback gate emits no usable script     -> reviewer takes the round
   gate_exec     check prints no verdict lines   -> reviewer takes the round
   ctx_budget    tiny $CONTEXT_TOKENS window     -> results cut before call
+  ctx_discover  window announced on /v1/models  -> budget arms itself
 """
 
 import asyncio
@@ -117,6 +118,26 @@ class MockModel(BaseHTTPRequestHandler):
             },
         }],
     }
+
+  def do_GET(self):  # noqa: N802 required by BaseHTTPRequestHandler
+    """Serves /v1/models: announces a window only when $MOCK_WINDOW > 0."""
+    win = int(os.environ.get("MOCK_WINDOW", "0"))
+    if self.path == "/v1/models" and win:
+      body = json.dumps({
+          "object": "list",
+          "data": [{
+              "id": "mock-model", "object": "model", "created": 0,
+              "owned_by": "mock", "max_model_len": win,
+          }],
+      }).encode()
+      self.send_response(200)
+    else:
+      body = json.dumps({"error": {"message": "not found"}}).encode()
+      self.send_response(404)
+    self.send_header("Content-Type", "application/json")
+    self.send_header("Content-Length", str(len(body)))
+    self.end_headers()
+    self.wfile.write(body)
 
   def do_POST(self):  # noqa: N802 required by BaseHTTPRequestHandler
     length = int(self.headers.get("Content-Length", "0"))
@@ -290,7 +311,7 @@ async def run_case(name, env_add, cfg, api_key="mock-test-key"):
   m_port, s_port = free_port(), free_port()
   for key in (
       "MOCK_CASE", "MOCK_FAIL_FROM", "MOCK_FAIL_TO", "MOCK_FAIL_STATUS",
-      "MOCK_FAIL_BODY", "MOCK_DELAY",
+      "MOCK_FAIL_BODY", "MOCK_DELAY", "MOCK_WINDOW",
   ):
     if key in env_add:
       os.environ[key] = str(env_add[key])
@@ -442,6 +463,19 @@ async def main():
   )
   check(ev, log_in=("context budget: cut",),
         log_not_in=("context full: cut",), name="ctx_budget")
+
+  # ctx_discover: no $CONTEXT_TOKENS anywhere; the endpoint announces a
+  # tiny window on /v1/models, so the proactive budget arms itself and
+  # cuts long old tool results before the call (GET never consumes a
+  # $MOCK_FAIL slot; the 404 default keeps the other cases unchanged)
+  ev, _ = await run_case(
+      "ctx_discover",
+      {"MOCK_CASE": "clean", "MOCK_WINDOW": "1500",
+       "MAX_OUTPUT_TOKENS": "1000"},
+      {"exec_output_chars": 30000},
+  )
+  check(ev, log_in=("context window: 1500 tokens", "context budget: cut"),
+        log_not_in=("context full: cut",), name="ctx_discover")
 
   # cancel: done must arrive within the evaluator's 10 s window
   ev, _ = await run_case("cancel", {"MOCK_CASE": "cancel"},

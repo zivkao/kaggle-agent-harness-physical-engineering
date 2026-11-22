@@ -78,15 +78,21 @@ CONTEXT_FULL = re.compile(
     re.I,
 )
 CUT_KEEP = 1000  # characters a tool result keeps once the context is full
-# DEF-003: a proactive context budget. $CONTEXT_TOKENS is the endpoint's
-# window (0: unknown -- keep only the reactive post-400 cut). The local
-# Strata run sets its own value and the declared model another, so it is
-# never a constant here. A call goes out only once the conversation plus
-# its reply budget fits the window minus $CTX_MARGIN_TOKENS; long old tool
-# results are shortened before the call instead of the endpoint answering
-# 400 and recover() cutting after the fact.
+# DEF-003: a proactive context budget. $CONTEXT_TOKENS pins the endpoint's
+# window (0: learn it from the endpoint once, see window_probe; if that
+# also fails, keep only the reactive post-400 cut). The serve container
+# receives no arbitrary host variables -- only submission.yaml's env --
+# so learning the window from the endpoint is what lets development
+# (local stand-in) and production (declared model) share one entry with
+# no pinned constant. A call goes out only once the conversation plus its
+# reply budget fits the window minus $CTX_MARGIN_TOKENS; 0: a margin of
+# window/12, at least 8000, because est_tokens (chars/4) undercounts
+# code-heavy transcripts. Long old tool results are shortened before the
+# call instead of the endpoint answering 400 and recover() cutting after
+# the fact.
 CONTEXT_TOKENS = int(os.environ.get("CONTEXT_TOKENS", "0"))
-CTX_MARGIN = int(os.environ.get("CTX_MARGIN_TOKENS", "8000"))
+CTX_MARGIN = int(os.environ.get("CTX_MARGIN_TOKENS", "0"))
+CTX_PROBED = False  # window_probe runs once per serve process
 # never shrink the reply budget below this, even if the conversation alone
 # no longer fits: let the reactive path handle it
 CTX_MIN_ANSWER = 1024
@@ -429,6 +435,53 @@ def est_tokens(messages):
   return len(json.dumps(messages, ensure_ascii=False)) // 4
 
 
+async def window_probe(session):
+  """Asks the model endpoint once what context window it actually serves.
+
+  LiteLLM-style proxies and most providers announce the window on
+  `/v1/models` (`max_model_len`, `max_context_length` or `context_length`).
+  Learning it lets the proactive budget match the endpoint that is really
+  wired up -- the local stand-in during development, the declared model
+  on the evaluation server -- without pinning either constant into the
+  entry. A failure leaves the budget off; the reactive post-400 cut is
+  the backstop either way.
+
+  Args:
+    session: Active `taskbridge.Session` for the task.
+  """
+  global CONTEXT_TOKENS
+  try:
+    listed = await asyncio.wait_for(client.models.list(), timeout=30)
+  except Exception as exc:  # endpoint may not expose /v1/models at all
+    await session.log(
+        f"context window: probe failed ({type(exc).__name__});"
+        " reactive path only"
+    )
+    return
+  wins = {}
+  for m in getattr(listed, "data", None) or []:
+    fields = m.model_dump() if hasattr(m, "model_dump") else {}
+    win = next(
+        (fields[k] for k in
+         ("max_model_len", "max_context_length", "context_length")
+         if isinstance(fields.get(k), int) and fields[k] > 0),
+        0,
+    )
+    if win:
+      wins[str(getattr(m, "id", ""))] = win
+  if not wins:
+    await session.log(
+        "context window: not announced by the endpoint;"
+        " reactive path only"
+    )
+    return
+  win = wins.get(MODEL) or min(wins.values())
+  CONTEXT_TOKENS = win
+  await session.log(
+      f"context window: {win} tokens (announced by the endpoint)"
+  )
+
+
 async def shorten(session, messages, tag="context full"):
   """Truncates the older half of long tool results to `CUT_KEEP` characters.
 
@@ -610,14 +663,20 @@ async def agent(session, messages, tools, until, final=False):
       timeout = min(WRAP_UP_SEC, left)
     else:
       timeout = left - until
-    # DEF-003: with a known window ($CONTEXT_TOKENS), trim old tool
-    # results before sending so the conversation plus its reply budget
-    # fits; the reply budget itself shrinks to the room left. The
-    # reactive cut in recover() stays as the backstop for unknown or
-    # mis-declared windows.
+    # DEF-003: with a known window ($CONTEXT_TOKENS or the endpoint's
+    # announced one), trim old tool results before sending so the
+    # conversation plus its reply budget fits; the reply budget itself
+    # shrinks to the room left. The reactive cut in recover() stays as
+    # the backstop for unknown or mis-declared windows.
+    global CTX_PROBED
+    if not CTX_PROBED:
+      CTX_PROBED = True
+      if not CONTEXT_TOKENS:
+        await window_probe(session)
     max_out = MAX_OUTPUT_TOKENS
     if CONTEXT_TOKENS:
-      room = CONTEXT_TOKENS - CTX_MARGIN - est_tokens(messages)
+      margin = CTX_MARGIN or max(8000, CONTEXT_TOKENS // 12)
+      room = CONTEXT_TOKENS - margin - est_tokens(messages)
       if room < 0:
         await session.log(
             f"context budget: over by {-room} tokens;"
@@ -627,7 +686,7 @@ async def agent(session, messages, tools, until, final=False):
         if not await shorten(session, messages, tag="context budget"):
           room = CTX_MIN_ANSWER  # bare conversation alone does not fit
           break
-        room = CONTEXT_TOKENS - CTX_MARGIN - est_tokens(messages)
+        room = CONTEXT_TOKENS - margin - est_tokens(messages)
       max_out = max(CTX_MIN_ANSWER, min(MAX_OUTPUT_TOKENS, room))
     try:
       reply = await asyncio.wait_for(
