@@ -174,8 +174,11 @@ class MockModel(BaseHTTPRequestHandler):
     # $MOCK_CTX_LIMIT refuses any prompt over that many chars/4 the way
     # Ollama words it, counting each refusal (0 disables)
     limit = int(os.environ.get("MOCK_CTX_LIMIT", "0"))
-    size = len(json.dumps(request.get("messages") or [],
-                          ensure_ascii=False)) // 4
+    # $MOCK_TOKEN_RATIO: real tokens per chars/4 unit (default 1), which
+    # usage.prompt_tokens reports and the window limits below are counted in
+    size = int(len(json.dumps(request.get("messages") or [],
+                              ensure_ascii=False)) // 4
+               * float(os.environ.get("MOCK_TOKEN_RATIO", "1")))
     if limit and size > limit:
       MockModel.flags["overflows"] = MockModel.flags.get("overflows", 0) + 1
       body = json.dumps({"error": {
@@ -216,9 +219,9 @@ class MockModel(BaseHTTPRequestHandler):
             "finish_reason": finish,
         }],
         "usage": {
-            "prompt_tokens": 500,
+            "prompt_tokens": size,
             "completion_tokens": made,
-            "total_tokens": 500 + made,
+            "total_tokens": size + made,
         },
     }).encode()
     self.send_response(200)
@@ -356,7 +359,7 @@ async def run_case(name, env_add, cfg, api_key="mock-test-key"):
   for key in (
       "MOCK_CASE", "MOCK_FAIL_FROM", "MOCK_FAIL_TO", "MOCK_FAIL_STATUS",
       "MOCK_FAIL_BODY", "MOCK_DELAY", "MOCK_WINDOW", "MOCK_CTX_LIMIT",
-      "MOCK_CTX_TRUNC",
+      "MOCK_CTX_TRUNC", "MOCK_TOKEN_RATIO",
   ):
     if key in env_add:
       os.environ[key] = str(env_add[key])
@@ -553,6 +556,22 @@ async def main():
   assert truncs == 1, f"ctx_trunc: {truncs} replies stopped at the window"
   check(ev, log_in=("from a reply cut at the window", "phase: verify 1"),
         name="ctx_trunc")
+
+  # ctx_ratio: as ctx_trunc, but the endpoint's tokens run 1.5x chars/4 (a
+  # code-heavy transcript). The window learned from the cut reply and the
+  # budget both count the endpoint's tokens (usage), so the next calls fit
+  # and the endpoint never stops a reply again
+  ev, _ = await run_case(
+      "ctx_ratio",
+      {"MOCK_CASE": "gate_fallback", "MOCK_CTX_TRUNC": "4000",
+       "MOCK_TOKEN_RATIO": "1.5", "CTX_MARGIN_TOKENS": "100",
+       "MAX_OUTPUT_TOKENS": "3000"},
+      {"exec_output_chars": 8000},
+  )
+  truncs = MockModel.flags.get("truncs", 0)
+  assert truncs == 1, f"ctx_ratio: {truncs} replies stopped at the window"
+  check(ev, log_in=("from a reply cut at the window", "phase: verify 1"),
+        name="ctx_ratio")
 
   # empty_cut: a reply cut at the output limit with no answer text (all
   # reasoning) gets a nudge that says so, not "continue where it stopped"

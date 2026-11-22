@@ -92,6 +92,11 @@ CUT_KEEP = 1000  # characters a tool result keeps once the context is full
 # the fact.
 CONTEXT_TOKENS = int(os.environ.get("CONTEXT_TOKENS", "0"))
 CTX_MARGIN = int(os.environ.get("CTX_MARGIN_TOKENS", "0"))
+# real prompt tokens per est_tokens unit, from the last reply's usage (None:
+# no reply yet). chars/4 drifts by content: EXP-026 #3 saw it run ~15% high
+# in one phase and low in another, enough to pin the reply budget at its
+# floor for 20 calls while the window still had room
+CTX_RATIO = None
 CTX_PROBED = False  # window_probe runs once per serve process
 # never shrink the reply budget below this, even if the conversation alone
 # no longer fits: let the reactive path handle it
@@ -434,7 +439,7 @@ async def recover(session, messages, exc, waits, until):
   """
   status = getattr(exc, "status_code", None)  # None: no HTTP answer
   if status == 400 and CONTEXT_FULL.search(str(exc)):
-    await learn_window(session, messages)
+    await learn_window(session, ctx_used(messages))
     return await shorten(session, messages)
   wait = next(waits, None)
   if wait is None or not (
@@ -464,6 +469,23 @@ def est_tokens(messages):
     The estimated prompt token count.
   """
   return len(json.dumps(messages, ensure_ascii=False)) // 4
+
+
+def ctx_used(messages):
+  """Estimates the real prompt tokens of `messages`: chars/4, calibrated.
+
+  Scales `est_tokens` by `CTX_RATIO`, the real-to-estimate ratio the last
+  reply's `usage.prompt_tokens` showed (it also absorbs the tool
+  definitions, which est_tokens does not see). Before any reply, chars/4.
+
+  Args:
+    messages: The conversation so far, in OpenAI chat format.
+
+  Returns:
+    The estimated prompt token count in the endpoint's own tokens.
+  """
+  est = est_tokens(messages)
+  return int(est * CTX_RATIO) if CTX_RATIO else est
 
 
 async def window_probe(session):
@@ -513,28 +535,25 @@ async def window_probe(session):
   )
 
 
-async def learn_window(session, messages, generated=0, how="an overflow"):
+async def learn_window(session, seen, how="an overflow"):
   """Takes the size of a conversation that hit the window as the window.
 
-  Two signals reach here. A refused prompt (400): the window is at most
-  `est_tokens(messages)`. A reply the server stopped at the window rather
-  than at the reply budget (Ollama answers 200, `finish_reason` "length",
-  fewer tokens than asked): the window is the prompt plus the `generated`
-  tokens. Keeping that as `CONTEXT_TOKENS` arms the proactive budget for
-  the rest of the task, so one hit per serve process replaces one per step
-  (and per refilled context). The prompt part is in `est_tokens` units,
-  which calibrates the chars/4 estimate to the real tokenizer for free. A
-  known window is only ever lowered: a hit under it means the estimate ran
-  low.
+  Two signals reach here, both in the endpoint's own tokens. A refused
+  prompt (400): the window is at most `ctx_used` of what was sent. A reply
+  the server stopped at the window rather than at the reply budget (Ollama
+  answers 200, `finish_reason` "length", fewer tokens than asked): the
+  window is that reply's prompt plus completion tokens, exactly. Keeping it
+  as `CONTEXT_TOKENS` arms the proactive budget for the rest of the task,
+  so one hit per serve process replaces one per step (and per refilled
+  context). A known window is only ever lowered: a hit under it means the
+  estimate ran low.
 
   Args:
     session: Active `taskbridge.Session` for the task.
-    messages: The conversation sent, before shortening or the reply.
-    generated: Tokens the server produced before it stopped (0 for a 400).
+    seen: Tokens of the conversation that hit the window.
     how: What hit the window, for the log line.
   """
   global CONTEXT_TOKENS
-  seen = est_tokens(messages) + generated
   if CONTEXT_TOKENS and seen >= CONTEXT_TOKENS:
     return
   CONTEXT_TOKENS = seen
@@ -734,7 +753,7 @@ async def agent(session, messages, tools, until, final=False):
     # conversation plus its reply budget fits; the reply budget itself
     # shrinks to the room left. The reactive cut in recover() stays as
     # the backstop for unknown or mis-declared windows.
-    global CTX_PROBED
+    global CTX_PROBED, CTX_RATIO
     if not CTX_PROBED:
       CTX_PROBED = True
       if not CONTEXT_TOKENS:
@@ -742,7 +761,7 @@ async def agent(session, messages, tools, until, final=False):
     max_out = MAX_OUTPUT_TOKENS
     if CONTEXT_TOKENS:
       margin = CTX_MARGIN or max(8000, CONTEXT_TOKENS // 12)
-      room = CONTEXT_TOKENS - margin - est_tokens(messages)
+      room = CONTEXT_TOKENS - margin - ctx_used(messages)
       if room < 0:
         await session.log(
             f"context budget: over by {-room} tokens;"
@@ -752,11 +771,12 @@ async def agent(session, messages, tools, until, final=False):
         if not await shorten(session, messages, tag="context budget"):
           room = CTX_MIN_ANSWER  # bare conversation alone does not fit
           break
-        room = CONTEXT_TOKENS - margin - est_tokens(messages)
+        room = CONTEXT_TOKENS - margin - ctx_used(messages)
       max_out = max(
           CTX_MIN_ANSWER,
           min(MAX_OUTPUT_TOKENS, CONTEXT_TOKENS // OUT_SHARE, room),
       )
+    sent = est_tokens(messages)
     try:
       reply = await asyncio.wait_for(
           client.chat.completions.create(
@@ -792,9 +812,12 @@ async def agent(session, messages, tools, until, final=False):
     )
     # stopped short of the reply budget: the window, not the budget, ended it
     # (Ollama keeps answering 200 there, so no 400 ever teaches recover())
+    seen = reply.usage.prompt_tokens if reply.usage else 0
     made = reply.usage.completion_tokens if reply.usage else None
-    if cut and made is not None and made + CUT_SLACK < max_out:
-      await learn_window(session, messages, made, "a reply cut at the window")
+    if seen and sent:
+      CTX_RATIO = seen / sent
+    if cut and seen and made is not None and made + CUT_SLACK < max_out:
+      await learn_window(session, seen + made, "a reply cut at the window")
     text = head + (message.content or "")
     if final and text:
       session.final_message = text
