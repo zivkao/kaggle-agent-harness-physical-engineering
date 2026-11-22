@@ -66,6 +66,14 @@
 - ④ **操作教訓（重現性）**：LiteLLM 必須綁 **0.0.0.0**——harness egress sidecar 在容器內走 `host.docker.internal:4000`→`172.17.0.1`，loopback-only 綁定讓 `model` 階段 FAIL（本次第一次 kit check 死因）；啟動需 `uv run --with "litellm[proxy]" --with websockets`（新版 litellm 純 `litellm` 缺 fastapi／websockets）；`pkill`/`pgrep -f` 的模式會命中工具 wrapper 自己的 command line（兩度 exit 144 自我終止）→ 啟停改放腳本 `/tmp/start_litellm.sh`（模式只存在腳本內）。
 - ⑤ **P2 正式開工**（使用者指示「依 progress.md 逐項完成，主要目標進入第二階段」）：P2-01～P2-04 已補上可重現證據（見 §3）；P2-05 四領域已 2/4（structural×2）→ 補 **EXP-018 `engineers-estimate-check`（電機, light L1, MCP×8）**＝新 gate 碼首戰＋main 路徑 MCP 實戰、**EXP-019 `emergency-spillway-check`（水資源, light L1, MCP×8）**排隊（串行，發射前另立 `.start`）。
 
+**2026-11-22（二十六）— 規則查核（官方 `docs/rules.md` 全文＋ple-bench.com；使用者已登入 Kaggle，但 Kaggle SPA 頁 WebFetch 抓不到內文）——多項既有假設需修正：**
+- ① **賽期＝2026-11-09 → 2027-01-05**（ple-bench.com；獎金 $250k/$100k/$50k）。⇒ P8 排程 01/01–01/06 **超出截止日**，必須在 01/04 前完成提交動作；ADR-004 凍結日 01/01 仍適用的同時，出口項目要前移。
+- ② **entry＝單一 GitHub commit**（`submission.yaml`＋harness＋`artifacts/`），**提交方式官方尚未公告**（"will be announced on the competition site"）→ 「交付演練」目前沒有正式管道；Kaggle 頁面是展示/註冊面則待使用者在瀏覽器確認（Rules/Timeline/Code Entries 三個 tab 抓不到）。
+- ③ **dev 分＝29 題平均，缺 usable artifacts 的題＝0 分**（rules.md §Dev score）。⇒ 修正本人先前的說法：「1 題 artifacts 就能交」只成立於 `kit check` 機械判定，**competitive entry 需要全 29 題由宣告模型實跑的 artifacts**；單題式演練只能驗管道、dev 分會很難看（≈0.03）。
+- ④ **每個 harness＋model 組合在 hidden test set 只有 3 次 run**（ple-bench.com "Three runs per harness and model"）→ 可靠度（P7）與模型選擇（P6）的價值上升；一次性的 luck 沒有第二次。
+- ⑤ **400 invalid request＝該 task 的 outcome**（已寫出的交付物照評、沒寫出＝0；harness 崩潰/6h 超時同計）⇒ `window_probe` 修復在正式環境直接值分；fair-play 再確認：artifacts 必須由 `eval/run.py`＋宣告模型匯出、禁手改、harness 禁讀 artifacts/評分檔、egress 只准模型端點。
+- ⑥ hidden test set＝56 題，評 ranking 方式未公告；dev artifacts 由官方 regrade 計 dev 分。**待使用者從瀏覽器貼回**：Kaggle Rules tab 全文、Timeline（entry 截止）、是否有 Code Entries 上限／Kaggle 端提交格式。
+
 **2026-11-22（二十五）— 「harness 一直爆掉＝做白工」調查：DEF-003 開關在 live 從未可達 → 實作 endpoint 視窗自我查詢（`window_probe`）：**
 - ① **注入謎團（結構性發現）**：`eval/run.py`→`kit/check.py Runtime`→serve 容器的 env 只有 `models.environment()`（模型鍵值）＋ `submission.yaml` 的 `env:` 表（`spec.py`：僅 `{src}/{port}` 佔位、禁引用 host 變數、保留鍵過濾）。⇒ **`$CONTEXT_TOKENS` 從外層 shell 進不了 serve 容器**——EXP-018 起「首波不設 CONTEXT_TOKENS」其實是「想設也設不到」；在 `submission.yaml` 寫死 262144 違反 R-009（對 strata 常數 overfit）且污染四核心檔對照，不採。
 - ② **修復（main，prompt 外碼變因）**：serve.py 新增 `window_probe()`——首次模型呼叫前向端點 `GET /v1/models`（`client.models.list()`，30 s 有界、每 process 一次），讀 `max_model_len`/`max_context_length`/`context_length`（優先 id==MODEL，否則取最小＝保守），設 `CONTEXT_TOKENS`；`$CONTEXT_TOKENS` 顯式值仍優先；探測失敗（端點不暴露/被 egress 擋/解析不出）→ 維持 0＝**完全退回既有被動路徑**，零回歸風險。dev 的 strata 本來就回報 `max_model_len: 262144`（本次預探可见），真 Opus 端點回報自己的 ⇒ **同一份碼兩邊都匹配，無常數**，正面回應「限制 harness 匹配模型」而不 overfit。
@@ -383,7 +391,7 @@ Failure taxonomy：`BOOT / PROTOCOL / MODEL / TOOL / MCP / FILE / FORMAT / CALCU
 | R-001 | Kaggle 要求身分驗證 | 影響正式提交 | Solo | 提交前完成 Kaggle 身分驗證 | OPEN |
 | R-002 | 工作區位於 Windows `D:` | 官方建議 WSL2 Linux filesystem | Solo | 已改在 WSL `~/projects/` 開發，Windows 端只放規劃文件 | CLOSED |
 | R-003 | 本機模型費用/配額未知 | 無法估算完整 dev run 成本 | Solo | 單題 baseline 記錄 tok/s 與 wall time | CLOSED（EXP-005：out 326,888 tok／14,310 s＝22.8 tok/s wall；in 34.6M、cache 命中 98.4%；換算 DeepSeek flash 單題 $0.19–0.38、29 題 $5–25） |
-| R-004 | Rules 頁需登入確認 | 資格/提交細節可能遺漏 | Solo | 登入後逐條確認並記錄 | OPEN |
+| R-004 | Rules 頁需登入確認 | 資格/提交細節可能遺漏 | Solo | 官方 `docs/rules.md` 全文已讀＋ple-bench.com 賽期/3-run 已記錄（§1（二十六））；Kaggle SPA 三 tab（Rules/Timeline/Entries）仍待使用者瀏覽器貼文；提交管道官方未公告 | PARTIAL |
 | R-005 | WSL 內未偵測到 uv 與 Harbor | 尚不能執行官方 kit 和 eval | Solo | 已安裝 uv 0.13.8 與 Harbor 0.20.0（官方 pin）| CLOSED |
 | R-006 | Hugging Face 資料 access | 29 題已解壓且雜湊全數吻合 | Solo | 使用本機 `--tasks-dir` | CLOSED |
 | R-007 | WSL 全面報 ERROR_FILE_NOT_FOUND（見 §12） | 所有 Linux 端工作暫停 | Solo | 根因為 `System32\wsl.exe` 缺少同目錄 `wslservice.exe`；改用 `C:\Program Files\WSL\wsl.exe` 後全部指令正常 | CLOSED |
