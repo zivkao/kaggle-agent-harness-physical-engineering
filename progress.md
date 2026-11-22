@@ -2,7 +2,7 @@
 
 最後更新：2026-11-22  
 目前階段：`P3 — 工程驗證核心（提前開工；P2 已 DONE）`  
-整體狀態：`P2_DONE_P3_IN_PROGRESS(3/5) — 全部暫停（使用者指示 2026-11-22 17:46「暫停／停止 harness」）：EXP-023 #2 與重發 #3（× ae07474，16:50）皆中止 INVALID；window_probe 首次 live＝proxy 從 /v1/models 剝除 Strata max_model_len → `not announced by the endpoint`、退回被動如設計零回歸，但 DEF-003 未解、解法待拍板（§1（二十八））；鏈路驗證仍有效（mock 14/14、kitcheck10 7/7、映像 d0e1181cef4cb463 可重用）；0 容器、0 background（LiteLLM/Strata 閒置運行）`
+整體狀態：`P2_DONE_P3_IN_PROGRESS(3/5) — 2026-11-22 晚：canonical repo 移到 Windows D: 資料夾、模型換 Gemma 4 26B（Ollama 64K），kit check 7/7（kitcheck11_gemma），首次 Gemma dev run 待選題（§1（二十九））；先前：全部暫停（使用者指示 2026-11-22 17:46「暫停／停止 harness」）：EXP-023 #2 與重發 #3（× ae07474，16:50）皆中止 INVALID；window_probe 首次 live＝proxy 從 /v1/models 剝除 Strata max_model_len → `not announced by the endpoint`、退回被動如設計零回歸，但 DEF-003 未解、解法待拍板（§1（二十八））；鏈路驗證仍有效（mock 14/14、kitcheck10 7/7、映像 d0e1181cef4cb463 可重用）；0 容器、0 background（LiteLLM/Strata 閒置運行）`
 完成度：`規劃 100% / 實作 36%（階段任務 20/56：P0 7/8＋P1 7/7＋P2 6/6）/ 官方驗證 70%（kit check 7/7 已過，kit artifacts／final check 待 P8）`
 
 > 本文件是唯一進度真相來源。任務只有附上可重現的驗證證據後才可標記完成。
@@ -13,7 +13,15 @@
 
 **2026-11-19 更新：** P1-07（MCP 中繼工具）已完成並通過 `kit check` 全部 7 階段；補丁版單題重跑 0.3557 vs 基線 0.3617（本題無 MCP，差異屬單次執行的模型隨機性，約 ±0.01）。
 
-### 2026-11-19 — 最終環境與通訊架構（Agent 必讀）
+### 2026-11-22 — 環境架構變更：canonical repo 改為 Windows 資料夾（Agent 必讀，取代下方 11-19 版的對應條目）
+
+- **使用者指示（2026-11-22 18:0x）**：把 WSL 做到一半的工作拉回本機資料夾，由 Windows 端 Claude Code（desktop app）接手，並接上本機 Ollama 的 Gemma 4。
+- **canonical Git repo＝`D:\project\vide-coding\ple-solo-harness`**（WSL 內路徑 `/mnt/d/project/vide-coding/ple-solo-harness`）。WSL `~/projects/ple-solo-harness` 的完整歷史（main 51 commits、quick 17 commits、tag `baseline-starter-0.3617`）已 fetch 進來：本機 `main`＝`71277af`、`quick`＝`7ab4ae6`，另留 `refs/remotes/wsl/*` 對照；工作區與 `71277af` 逐檔相同（`git status` 空）。本 repo 設 `core.autocrlf=false`，`.gitattributes` 為 `* text=auto eol=lf`。
+- **WSL 舊 repo `~/projects/ple-solo-harness`（及 `-quick` worktree）停止使用**，保留不刪作備份；不得再在那裡 commit，否則兩邊分岔。
+- **執行面仍在 WSL `Ubuntu`**：Docker、Harbor、uv、官方 kit（`~/projects/ple-reference`）、資料（`~/projects/ple-data`）、`local.env`、LiteLLM（`~/projects/model_proxy`）、run 目錄都不動。Windows 端以 `C:\Program Files\WSL\wsl.exe -d Ubuntu -u zivkao -e bash -c '...'` 驅動，`kit check`／`eval/run.py` 的 entry 參數改用 `/mnt/d/project/vide-coding/ple-solo-harness`。Windows 本身沒有 uv／Docker。
+- **模型**：Windows 本機 Ollama 0.40.17（`127.0.0.1:11434`，WSL mirrored loopback 可直達）。見 §1（二十九）。
+
+### 2026-11-19 — 最終環境與通訊架構（Agent 必讀；canonical repo 與 Claude 控制面兩條已被上方 11-22 版取代）
 
 - **WSL `Ubuntu` 是唯一 PLE 開發與 Agent 執行環境。** Claude Code、canonical repo、Docker、Harbor、LiteLLM 與評測均在此 distro 內執行；canonical repo 為 `/home/zivkao/projects/ple-solo-harness`。
 - Windows 只負責以 `C:\\Program Files\\WSL\\wsl.exe -d Ubuntu ...` 按需啟動或停止 distro，不作為 Claude 的日常專案控制面。
@@ -65,6 +73,16 @@
 - ③ **驗證**：mock 契約suite擴至 **13/13**（`clean`／`fix_round` 改依 gate 流程：gate exec 由 evaluator 的 `gate_outs` 指令队列回答、獨立計數不干擾故障注入；新增 `gate_fallback`（prose→`no usable script`→reviewer 接手）／`gate_exec`（崩潰無 verdict 線→接手、不重跑）／`ctx_budget`（小視窗先 cut 再送、全程無 400）；過程中修掉 `phase: gate N` 只在建立輪標記的錯誤）；pyflakes 0、AST ok、prompt 字串外無長行。官方 `kit check --rebuild`（`kitcheck6.log`）：**7 階段全 PASS**（build 31 s 映像 `plebench-serve:6fb67fa48bbb4548`／model 21.8 s／listen 1 s／smoke 157 s 11 呼叫／mcp 171 s 12 呼叫），僅剩慣常 `artifacts` WARN（R-012）。
 - ④ **操作教訓（重現性）**：LiteLLM 必須綁 **0.0.0.0**——harness egress sidecar 在容器內走 `host.docker.internal:4000`→`172.17.0.1`，loopback-only 綁定讓 `model` 階段 FAIL（本次第一次 kit check 死因）；啟動需 `uv run --with "litellm[proxy]" --with websockets`（新版 litellm 純 `litellm` 缺 fastapi／websockets）；`pkill`/`pgrep -f` 的模式會命中工具 wrapper 自己的 command line（兩度 exit 144 自我終止）→ 啟停改放腳本 `/tmp/start_litellm.sh`（模式只存在腳本內）。
 - ⑤ **P2 正式開工**（使用者指示「依 progress.md 逐項完成，主要目標進入第二階段」）：P2-01～P2-04 已補上可重現證據（見 §3）；P2-05 四領域已 2/4（structural×2）→ 補 **EXP-018 `engineers-estimate-check`（電機, light L1, MCP×8）**＝新 gate 碼首戰＋main 路徑 MCP 實戰、**EXP-019 `emergency-spillway-check`（水資源, light L1, MCP×8）**排隊（串行，發射前另立 `.start`）。
+
+**2026-11-22（二十九）— repo 拉回 Windows 本機資料夾＋接上本機 Ollama Gemma 4 26B（`google-cloud/gemma-4-26b`），官方 `kit check` 7 階段全 PASS：**
+- ① **repo 遷移**：見上方「2026-11-22 環境架構變更」。WSL 舊 repo 停用、保留作備份。
+- ② **Ollama 實測（2×RTX 3060 12 GB）**：`gemma4:26b`（25.2B、Q4_K_M、原生 context 262,144、tools／thinking 能力、附 draft model）。fork session 的 ctxfit：`num_ctx` 32,768／65,536 → 100% GPU（約 11.4＋10.2 GB）；98,304／131,072 → **OOM**（Ollama auto-fit 的 CPU offload 重試失敗）。⇒ 新建 **`gemma4:26b-64k`**（`FROM gemma4:26b`＋`PARAMETER num_ctx 65536`），不依賴全域 `OLLAMA_CONTEXT_LENGTH`。fork 另測得：用 Ollama 內附的 llama-server.exe 直接跑 `-c 262144 -fa on -ctk q8_0 -ctv q8_0 -ngl 99 --n-cpu-moe 6 --jinja` 可載入 256K（n_ctx 262,144）；fork 回報的 decode 7.9 tok/s 與 VRAM 數字**作廢**（整段測速都與本 session 的 Ollama runner 同時佔 GPU，長 prompt 測試被中斷、無資料），速度需重測；其 `/v1/models` 以 `meta.n_ctx` 宣告視窗，`window_probe` 目前不解析此欄位。64K 全 GPU vs 256K 部分 CPU 的取捨待實測比較。
+- ③ **端點契約（WSL 端直打 `127.0.0.1:11434/v1`，mirrored loopback）**：非串流與串流都回 `tool_calls`（`bash` → `ls /app`）；超過 64K 的 prompt（451,524 字元）回 **HTTP 400** `the prompt is longer than the context length currently available to the model`（不會靜默截斷）。經 LiteLLM 後仍是 400（`litellm.BadRequestError: OpenAIException - ...context length...`），**符合 serve.py `CONTEXT_FULL` 正規式** ⇒ 事後剪枝路徑可接住。
+- ④ **LiteLLM**：`config.yaml` 新增 `gemma-4-26b`／`gemma-4-26b-judge` → `openai/gemma4:26b-64k`＠`http://127.0.0.1:11434/v1`（Qwen／claude 別名保留不動）；`local.env` 的 `JUDGE_MODEL` 改為 `gemma-4-26b-judge`（Strata 目前未運行）；修正 `start_litellm.sh` 的 pkill 模式（舊模式 `.*model_proxy/config.yaml` 對不上實際命令列 `--config config.yaml`，舊 proxy 殺不掉、新 proxy 綁不到 port）。三檔改前皆備份為 `*.before-gemma-20261122`。啟動前需 `export PATH="$HOME/.local/bin:$PATH"`。
+- ⑤ **`submission.yaml`**：`model_api` 改為 `google-cloud/gemma-4-26b`（使用者指示接 Gemma；屬贊助模型，可作 Stage 2 目標候選）。**未 commit**。
+- ⑥ **驗證**：`kit check /mnt/d/project/vide-coding/ple-solo-harness --env-file ../local.env --rebuild` → **rc=0**（`~/projects/kitcheck11_gemma.log`）：build 31 s 映像 `plebench-serve:df5618bbb7235220`／model `Gemma 4 26B A4B answered in 1.5 s`／listen 2 s／smoke 52 s 5 呼叫（3,238 in／3,672 out）／mcp 23 s 15 呼叫；WARN 只有 `files: not committed`（submission.yaml）與慣常 `artifacts`。⇒ harness 從 Windows 資料夾經 9p 掛載建置可行。
+- ⑦ **期間事件**：fork session 的 llama-server（:11500）與本 session 的 Ollama runner 同時佔 GPU（合計約 21.5 GB），使用者選擇停 fork 測速；重疊期間的測速數字作廢。fork 曾以 `OLLAMA_CONTEXT_LENGTH=131072` 重啟 Ollama（18:02），該變數已從使用者環境移除；Ollama 下次重啟前，未自設 `num_ctx` 的模型預設 131K（Gemma 會 OOM）。
+- ⑧ **待辦／風險**：(a) 64K 視窗遠小於 Qwen 時期的 262K，heavy 題將頻繁走 400→剪枝（每次約 0.5–19 s），DEF-003 的事前預算在 live 仍不可達（LiteLLM 剝 `/v1/models` 欄位）；(b) Ollama 預設 `OLLAMA_KEEP_ALIVE` 5 分鐘、`OLLAMA_NUM_PARALLEL` 1，長工具呼叫後可能重新載入（約 12 s）；(c) Gemma 為 Stage 2 贊助模型之一，本機結果可直接作跨模型比較的第二個模型（Rubric 3），但本機 Q4 量化與 Google 端託管版本不完全相同。
 
 **2026-11-22（二十八）— Kaggle Overview 全文已讀（Windows 端內建瀏覽器，免登入可見）→ 修正 §1（二十六）與 R-004／R-012 的多項假設：**
 - ① **提交管道已公告＝Kaggle Writeup**（≤2,000 字；可 un-submit／改／再 submit 至截止，未 submit 的草稿不評）。Writeup 頂端放 40 字元 commit SHA（`git rev-parse HEAD`），Project Links 放 GitHub repo URL；ple-bench.com 直接註冊／提交已關閉。必附：Media Gallery 封面圖＋3 張圖＝(1) 架構圖、(2) score-vs-cost 圖、(3) 29 題 dev 失敗分解。repo 若私有需裝 `ple-submission` GitHub App，賽末公開。⇒ 修正（二十六）②「提交方式官方尚未公告」。
@@ -151,6 +169,7 @@
 
 ### 下一個可執行任務
 
+0. **（2026-11-22 新）Gemma 4 首次 dev run**：鏈路與 `kit check` 已就緒（§1（二十九））；下一步等使用者選題（建議先 light 題，如 `emergency-spillway-check` 或 `engineers-estimate-check`，有 Qwen 錨點可比），並先 commit `submission.yaml` 的模型變更。指令：`wsl.exe -d Ubuntu -u zivkao -e bash -c 'export PATH=$HOME/.local/bin:$PATH; cd ~/projects/ple-reference; uv run python eval/run.py /mnt/d/project/vide-coding/ple-solo-harness --env-file ../local.env --tasks-dir $HOME/projects/ple-data/tasks --tasks <id> --no-export'`。
 1. **全部暫停（使用者指示 2026-11-22；離線工不在暫停範圍、已做）**：EXP-023 #2 與重發 #3（× `ae07474`、16:50:29、~56 min）皆中止（INVALID，§6 行；部分轉錄保留、可 `--regrade`；皆不重跑除非指示）。`window_probe` 已上線但**首次 live 發現 proxy 從 `/v1/models` 剝除 Strata `max_model_len`**（轉錄＝`not announced by the endpoint`）＝爆掉問題**未解**、DEF-003 重開，解法待拍板（§1（二十八）②：proxy 透傳／`submission.yaml` `env:`（R-009）／其他；原「外層帶 `CONTEXT_TOKENS` 環境值」方案作廢——注入鏈路在 live 不存在）。**重新發射前必經**：① 使用者明確同意 ⏳；② `kit check --rebuild` ✅ 2026-11-22 15:59（`kitcheck10.log` 7/7、映像 `d0e1181cef4cb463`、含 `window_probe`＋P3-04a 於 HEAD `ae07474`）；③ 判準新增＝轉錄見 `context window: 262144 tokens (announced…)` 且 egress 0 筆 exceeds-context 400。engineers 三岔（(b) 估雜訊／(c) 回退）仍擱置。
 2. **heavy 側 P3 A/B 需先補 gate-only heavy 錨**（一題 heavy 於 `85d1cbd`：含 gate 碼、無 ledger）才能與 P2（`eb918d8`）及 ledger 版三點對照；建議 `roof-deck-design`（checks、中量）或 `eor-review-corrections` 重跑。
 2. **DEF-003 live 驗證**：下一個 heavy 對照 run 帶 `CONTEXT_TOKENS=262144`（僅 dev，不綁宣告模型；R-009），對照 EXP-016/017 尾聲 400 是否消失、收尾自我驗證輪是否保住。
