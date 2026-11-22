@@ -101,6 +101,18 @@ CTX_MIN_ANSWER = 1024
 MAX_NUDGES = 3
 # lower it for a small context window
 MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "32000"))
+# once the window is known, one reply never asks for more than this share of
+# it: a reasoning model can spend a whole reply budget thinking (EXP-024: one
+# 32K-token reply, all reasoning, half of a 64K window)
+OUT_SHARE = 4
+# sent after a reply that hit the output limit before it wrote any answer:
+# nothing of it reaches the conversation, so "continue where it stopped" would
+# point at text the model cannot see
+EMPTY_CUT = (
+    "Your reasoning ran past the output limit before you wrote any answer,"
+    " so none of it was kept. Answer now: keep your reasoning short and do"
+    " detailed work with the tools."
+)
 # Claude caches a prompt prefix only when marked with cache_control. Each call
 # marks the system prompt and the latest message (using 2 of Claude's 4 cache
 # breakpoints) so each turn reads the prior conversation from cache. Other
@@ -121,6 +133,16 @@ GATE_PATH = "/tmp/ple_gate.py"
 GATE_MAX_FAILS = 30
 GATE_GAP_CHARS = 4000
 GATE_SCRIPT_CHARS = 60_000
+# A FAIL line saying the check's own tooling is missing (a bare command or a
+# Python module, not a deliverable path) reports a broken check, not a gap
+# in the files: EXP-024's gate called `strings`, absent from the container,
+# and two fix rounds reread files that were fine. A missing file named by a
+# path stays a gap.
+CHECK_BROKE = re.compile(
+    r"No such file or directory: '[^'/]+'|command not found"
+    r"|No module named|ModuleNotFoundError|NameError",
+    re.I,
+)
 # The endpoint key the evaluator provides. Log lines are free text the
 # graders record, so anything logged passes through `safe`, which replaces
 # the key (asserted by the `redaction` case in tests/mock_contract_test.py).
@@ -580,7 +602,8 @@ async def gate_run(session, script):
   Returns:
     "PASS" when no printed line starts with FAIL, the FAIL lines (capped
     to `GATE_MAX_FAILS` lines and `GATE_GAP_CHARS` characters) as the gap
-    list when some do, or None when the run printed no verdict lines.
+    list when some do, or None when the run printed no verdict lines or a
+    FAIL line shows the check's own tooling is missing (`CHECK_BROKE`).
   """
   try:
     await session.write_file(GATE_PATH, script)
@@ -602,6 +625,12 @@ async def gate_run(session, script):
     return None
   if not fails:
     return "PASS"
+  broke = [ln for ln in fails if CHECK_BROKE.search(ln)]
+  if broke:
+    await session.log(
+        safe(f"gate: check itself failed ({broke[0][:200]})")
+    )
+    return None
   return "\n".join(fails[:GATE_MAX_FAILS])[:GATE_GAP_CHARS]
 
 
@@ -718,7 +747,10 @@ async def agent(session, messages, tools, until, final=False):
           room = CTX_MIN_ANSWER  # bare conversation alone does not fit
           break
         room = CONTEXT_TOKENS - margin - est_tokens(messages)
-      max_out = max(CTX_MIN_ANSWER, min(MAX_OUTPUT_TOKENS, room))
+      max_out = max(
+          CTX_MIN_ANSWER,
+          min(MAX_OUTPUT_TOKENS, CONTEXT_TOKENS // OUT_SHARE, room),
+      )
     try:
       reply = await asyncio.wait_for(
           client.chat.completions.create(
@@ -767,14 +799,17 @@ async def agent(session, messages, tools, until, final=False):
       if wrap_up or (message.content and not cut) or nudges == MAX_NUDGES:
         return text
       nudges, head = nudges + 1, text
-      messages.append({
-          "role": "user",
-          "content": (
-              "Your reply was cut off; continue where it stopped."
-              if cut
-              else "Continue, and finish with your answer."
-          ),
-      })
+      if cut and not message.content:
+        await session.log(
+            "reply cut off before any answer (reasoning only);"
+            " asking for the answer"
+        )
+        nudge = EMPTY_CUT
+      elif cut:
+        nudge = "Your reply was cut off; continue where it stopped."
+      else:
+        nudge = "Continue, and finish with your answer."
+      messages.append({"role": "user", "content": nudge})
       continue
     nudges, head = 0, ""
     messages.append(turn)
@@ -872,7 +907,8 @@ async def solve(session):
     )
     if verdict is None:
       if check_script is not None:
-        check_script = None  # a check naming no verdict lines is not rerun
+        # a check with no verdict lines, or broken tooling, is not rerun
+        check_script = None
       if not time_for(until(CHECK_SHARE / 2)):
         break
       await session.log(f"phase: verify {round_num}")

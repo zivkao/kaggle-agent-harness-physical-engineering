@@ -5,7 +5,7 @@ Run from the harness folder:
   uv run --no-project --python 3.12 --with websockets,openai \
     python tests/mock_contract_test.py
 
-Fifteen scenarios assert the P1 exit conditions (bounded ends under
+Nineteen scenarios assert the P1 exit conditions (bounded ends under
 faults) plus the protocol contract:
 
   clean         scripted plan/work/gate PASS    -> done, phases logged
@@ -23,6 +23,10 @@ faults) plus the protocol contract:
   ctx_budget    tiny $CONTEXT_TOKENS window     -> results cut before call
   ctx_discover  window announced on /v1/models  -> budget arms itself
   ctx_learn     window unknown, size-based 400  -> learned once, then cut
+  empty_cut     reply cut with no answer text   -> nudge says so
+  out_cap       known window, big output cap    -> reply <= window / 4
+  gate_broke    check's own command missing     -> reviewer, no fix round
+  gate_missing_file  deliverable path missing   -> still a gap, fix round
 """
 
 import asyncio
@@ -79,6 +83,13 @@ class MockModel(BaseHTTPRequestHandler):
     if role == "planner":
       if call == 1:
         return self.tool("bash", {"command": "ls"})
+      if case == "empty_cut" and call == 2:
+        # all reasoning, no answer, cut at the output limit
+        return {"role": "assistant", "content": "", "_finish": "length"}
+      if "ran past the output limit" in last:
+        MockModel.flags["saw_empty_cut"] = True
+      if "continue where it stopped" in last:
+        MockModel.flags["saw_continue"] = True
       return {"role": "assistant", "content": "PLAN: write /app/out.txt"}
     if role == "worker":
       if case == "fix_round" and call >= 3:  # the fix round and its answer
@@ -181,14 +192,18 @@ class MockModel(BaseHTTPRequestHandler):
     delay = float(os.environ.get("MOCK_DELAY", "0"))
     if delay:
       time.sleep(delay)
+    asked = request.get("max_completion_tokens") or 0
+    MockModel.flags["max_out"] = max(MockModel.flags.get("max_out", 0), asked)
+    message = self.reply(request)
+    finish = message.pop("_finish", "stop")
     body = json.dumps({
         "id": f"cm{MockModel.n}",
         "object": "chat.completion",
         "model": "mock",
         "choices": [{
             "index": 0,
-            "message": self.reply(request),
-            "finish_reason": "stop",
+            "message": message,
+            "finish_reason": finish,
         }],
         "usage": {
             "prompt_tokens": 500,
@@ -512,6 +527,48 @@ async def main():
   check(ev, log_in=("context window: learned", "context full: cut",
                     "context budget: cut", "phase: verify 1"),
         name="ctx_learn")
+
+  # empty_cut: a reply cut at the output limit with no answer text (all
+  # reasoning) gets a nudge that says so, not "continue where it stopped"
+  ev, _ = await run_case("empty_cut", {"MOCK_CASE": "empty_cut"}, {})
+  assert MockModel.flags.get("saw_empty_cut"), "empty_cut: nudge not sent"
+  assert not MockModel.flags.get("saw_continue"), "empty_cut: old nudge sent"
+  check(ev, log_in=("reply cut off before any answer",),
+        final_in=("summary: /app/out.txt",), name="empty_cut")
+
+  # out_cap: with a known window, no call asks for more than a quarter of
+  # it, even when $MAX_OUTPUT_TOKENS allows far more
+  ev, _ = await run_case(
+      "out_cap",
+      {"MOCK_CASE": "clean", "CONTEXT_TOKENS": "8000",
+       "CTX_MARGIN_TOKENS": "100", "MAX_OUTPUT_TOKENS": "32000"},
+      {},
+  )
+  asked = MockModel.flags.get("max_out", 0)
+  assert 0 < asked <= 2000, f"out_cap: a call asked for {asked} tokens"
+  check(ev, name="out_cap")
+
+  # gate_broke: the check's own tooling is missing (a bare command), so it
+  # is a broken check, not a gap: the reviewer takes the round, no fix round
+  ev, _ = await run_case(
+      "gate_broke",
+      {"MOCK_CASE": "clean"},
+      {"gate_outs": ["FAIL F2: Could not read memo content: [Errno 2] No"
+                     " such file or directory: 'strings'"]},
+  )
+  check(ev, log_in=("gate: check itself failed", "phase: verify 1"),
+        log_not_in=("phase: fix 1", "phase: gate 2"), name="gate_broke")
+
+  # gate_missing_file: a missing deliverable named by a path is still a
+  # gap and drives a fix round
+  ev, _ = await run_case(
+      "gate_missing_file",
+      {"MOCK_CASE": "fix_round"},
+      {"gate_outs": ["FAIL g1: [Errno 2] No such file or directory:"
+                     " '/app/out.txt'", "PASS scripted-ok"]},
+  )
+  check(ev, log_in=("phase: fix 1", "phase: gate 2"),
+        log_not_in=("gate: check itself failed",), name="gate_missing_file")
 
   # cancel: done must arrive within the evaluator's 10 s window
   ev, _ = await run_case("cancel", {"MOCK_CASE": "cancel"},
