@@ -121,6 +121,15 @@ EMPTY_CUT = (
     " so none of it was kept. Answer now: keep your reasoning short and do"
     " detailed work with the tools."
 )
+# sent after a reply that hit the output limit inside a tool call: the call's
+# arguments are cut, so it is not run (EXP-027: ~100 heredocs cut before
+# their EOF line were run anyway, each writing a partial file)
+CALL_CUT = (
+    "Your reply hit the output limit ({limit} tokens) inside a tool call, so"
+    " the call was cut off and not run. Make smaller calls: write a long file"
+    " or script in parts (write the first part, then append the rest), and"
+    " keep your reasoning short."
+)
 # Claude caches a prompt prefix only when marked with cache_control. Each call
 # marks the system prompt and the latest message (using 2 of Claude's 4 cache
 # breakpoints) so each turn reads the prior conversation from cache. Other
@@ -190,12 +199,14 @@ item a change belongs to, which quantity convention applies) and for every duty,
 source states that the deliverable must reflect, append one tab-separated line to `/tmp/ple_assumptions.tsv` -- \
 statement, exact source citation (file, and sheet, row or section), the alternative reading considered, and why \
 this one was chosen. Write each deliverable exactly where and in the format the task \
-asks, then open it again to check it. When you are done, reply without calling a tool: a short summary of each \
+asks, then open it again to check it. An archive holds its files at its top level unless the task says \
+otherwise: build it from inside the folder (`cd dir && zip out.zip a b`), never from an absolute path, and list \
+its entries to check. When you are done, reply without calling a tool: a short summary of each \
 deliverable, where it is, and the key results."""
 
 VERIFIER = """You check an engineer's work on a task in a Linux container. You get the task, the plan, and the \
 engineer's summary of what was delivered. Open every deliverable with your tools (bash starts in {workdir}) and check \
-it against the task: the path, the format, every part the task asks for, and the key numbers, recomputed. Do not \
+it against the task: the path, the format, the entry paths inside an archive, every part the task asks for, and the key numbers, recomputed. Do not \
 create or change any file. If everything holds, reply with the single word PASS and nothing else. Otherwise reply \
 with a numbered list of the gaps, each specific enough to fix."""
 
@@ -207,7 +218,7 @@ block and nothing else. The script runs as `python3` inside the task container: 
 file, write only under /tmp, prints one line per hard requirement the task states -- `PASS <id>` when it \
 holds, `FAIL <id>: <what is wrong, and in which file and row>` when it does not -- cheapest checks first, \
 and exits 0 either way. Cover every mechanically checkable requirement: each required file at its exact \
-path, table headers, column names and column order, value formats such as drawing-number and \
+path (inside an archive, at its exact entry path, top level unless the task says otherwise), table headers, column names and column order, value formats such as drawing-number and \
 revision-suffix rules, row and sheet ordering, required sections and counts. Recompute, never reread: \
 the engineer may leave `/tmp/ple_ledger.tsv` with one row per derived figure (id, deliverable path, \
 value, source files, formula). If it exists your script must read every row and recompute each value \
@@ -560,12 +571,58 @@ async def learn_window(session, seen, how="an overflow"):
   await session.log(f"context window: learned {seen} tokens from {how}")
 
 
-async def shorten(session, messages, tag="context full"):
-  """Truncates the older half of long tool results to `CUT_KEEP` characters.
+def cut_args(arguments):
+  """Shortens each long string in a tool call's JSON arguments.
 
-  Repeated calls truncate progressively newer results. Claude's thinking blocks
-  are kept intact because each block's signature is self-contained and Claude
-  rejects tool loops if the latest assistant turn loses its thinking block.
+  Args:
+    arguments: The call's `function.arguments` JSON text.
+
+  Returns:
+    The arguments with every string over `CUT_KEEP` characters cut to
+    `CUT_KEEP`, still valid JSON; unchanged when they are not a JSON object.
+  """
+  try:
+    args = json.loads(arguments)
+  except ValueError:
+    return arguments
+  if not isinstance(args, dict):
+    return arguments
+  note = "\n[... cut to save context; already run]"
+  for key, value in args.items():
+    if isinstance(value, str) and len(value) > CUT_KEEP:
+      args[key] = value[:CUT_KEEP] + note
+  return json.dumps(args, ensure_ascii=False)
+
+
+def cuttable(message):
+  """Whether `shorten` can make `message` shorter.
+
+  Args:
+    message: One chat message.
+
+  Returns:
+    True for a tool result over 2 * `CUT_KEEP` characters, or an assistant
+    turn with a tool call whose arguments `cut_args` shortens by that much.
+  """
+  if message["role"] == "tool":
+    return len(message["content"]) > 2 * CUT_KEEP
+  calls = message.get("tool_calls") or ()
+  return any(
+      len(a) - len(cut_args(a)) > CUT_KEEP
+      for a in (c["function"]["arguments"] for c in calls)
+  )
+
+
+async def shorten(session, messages, tag="context full"):
+  """Cuts the older half of long tool results and tool-call arguments.
+
+  A tool result keeps its first `CUT_KEEP` characters; a tool call keeps
+  each argument string's first `CUT_KEEP` (the call already ran, and file
+  contents written through a call fill a 64K window as fast as results do,
+  EXP-027). Repeated calls cut progressively newer messages. Claude's
+  thinking blocks are kept intact because each block's signature is
+  self-contained and Claude rejects tool loops if the latest assistant turn
+  loses its thinking block.
 
   Args:
     session: Active `taskbridge.Session` for the task.
@@ -574,21 +631,22 @@ async def shorten(session, messages, tag="context full"):
       "context budget" before a call that would not fit).
 
   Returns:
-    Whether any tool result was truncated.
+    Whether anything was cut.
   """
-  long = [
-      n
-      for n, m in enumerate(messages)
-      if m["role"] == "tool" and len(m["content"]) > 2 * CUT_KEEP
-  ]
+  long = [n for n, m in enumerate(messages) if cuttable(m)]
   if not long:
     return False
   cut = long[: max(1, len(long) // 2)]
   for n in cut:
-    messages[n]["content"] = (
-        messages[n]["content"][:CUT_KEEP]
-        + "\n[... cut to save context; run the tool again if needed]"
-    )
+    m = messages[n]
+    if m["role"] == "tool":
+      m["content"] = (
+          m["content"][:CUT_KEEP]
+          + "\n[... cut to save context; run the tool again if needed]"
+      )
+      continue
+    for call in m["tool_calls"]:
+      call["function"]["arguments"] = cut_args(call["function"]["arguments"])
   await session.log(f"{tag}: cut {len(cut)} old tool results")
   return True
 
@@ -824,8 +882,9 @@ async def agent(session, messages, tools, until, final=False):
     # sent back as returned: Gemini refuses a tool call without its thought
     # signature
     turn = message.model_dump(exclude_none=True)
-    if wrap_up or not message.tool_calls:
-      turn.pop("tool_calls", None)  # calls made at the wrap-up are not run
+    if wrap_up or not message.tool_calls or cut:
+      # calls made at the wrap-up, or cut off at the output limit, are not run
+      turn.pop("tool_calls", None)
       if message.content:
         # a fix round, or the request to go on after a cut-off reply, continues
         # from this answer
@@ -833,7 +892,13 @@ async def agent(session, messages, tools, until, final=False):
       if wrap_up or (message.content and not cut) or nudges == MAX_NUDGES:
         return text
       nudges, head = nudges + 1, text
-      if cut and not message.content:
+      if message.tool_calls:  # cut off inside a call
+        await session.log(
+            "reply cut off inside a tool call; call not run, asking for"
+            " smaller calls"
+        )
+        nudge = CALL_CUT.format(limit=max_out)
+      elif cut and not message.content:
         await session.log(
             "reply cut off before any answer (reasoning only);"
             " asking for the answer"

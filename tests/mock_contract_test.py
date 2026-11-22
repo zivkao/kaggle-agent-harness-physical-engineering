@@ -74,6 +74,15 @@ class MockModel(BaseHTTPRequestHandler):
       MockModel.flags["saw_gap"] = True  # the fix-round prompt arrived
     if "exit code 1" in json.dumps(messages):
       MockModel.flags["saw_exit1"] = True
+    for m in messages:  # old tool calls cut by shorten() stay valid JSON
+      for c in m.get("tool_calls") or ():
+        arguments = c["function"]["arguments"]
+        if "already run]" in arguments:
+          MockModel.flags["saw_args_cut"] = True
+        try:
+          json.loads(arguments)
+        except ValueError:
+          MockModel.flags["bad_args"] = True
     if request.get("tool_choice") == "none":  # a wrap-up call
       return {"role": "assistant", "content": "wrapped up: partial work"}
     if case == "cancel":
@@ -92,6 +101,20 @@ class MockModel(BaseHTTPRequestHandler):
         MockModel.flags["saw_continue"] = True
       return {"role": "assistant", "content": "PLAN: write /app/out.txt"}
     if role == "worker":
+      if case == "call_cut":  # first call cut at the output limit
+        if call == 1:
+          cut = self.tool(
+              "write_file", {"path": "/app/out.txt", "content": "PARTIAL"}
+          )
+          cut["_finish"] = "length"
+          return cut
+        if "inside a tool call" in last:
+          MockModel.flags["saw_call_cut"] = True
+        call -= 1  # then as clean
+      if case == "args_cut" and call == 1:  # a long file through a call
+        return self.tool(
+            "write_file", {"path": "/app/out.txt", "content": "x" * 30000}
+        )
       if case == "fix_round" and call >= 3:  # the fix round and its answer
         if call == 3:
           return self.tool("bash", {"command": "printf '\\n' >> /app/out.txt"})
@@ -580,6 +603,27 @@ async def main():
   assert not MockModel.flags.get("saw_continue"), "empty_cut: old nudge sent"
   check(ev, log_in=("reply cut off before any answer",),
         final_in=("summary: /app/out.txt",), name="empty_cut")
+
+  # call_cut: a reply cut at the output limit inside a tool call is not
+  # run (its arguments are cut); the model is asked for smaller calls
+  ev, _ = await run_case("call_cut", {"MOCK_CASE": "call_cut"}, {})
+  assert MockModel.flags.get("saw_call_cut"), "call_cut: nudge not sent"
+  check(ev, log_in=("reply cut off inside a tool call",),
+        log_not_in=("PARTIAL",), final_in=("summary: /app/out.txt",),
+        name="call_cut")
+
+  # args_cut: a long file written through a tool call fills the window as
+  # a long result does; the budget cuts the old call's arguments, which
+  # stay valid JSON
+  ev, _ = await run_case(
+      "args_cut",
+      {"MOCK_CASE": "args_cut", "CONTEXT_TOKENS": "4000",
+       "CTX_MARGIN_TOKENS": "100", "MAX_OUTPUT_TOKENS": "1000"},
+      {},
+  )
+  assert MockModel.flags.get("saw_args_cut"), "args_cut: arguments not cut"
+  assert not MockModel.flags.get("bad_args"), "args_cut: invalid arguments"
+  check(ev, log_in=("context budget: cut",), name="args_cut")
 
   # out_cap: with a known window, no call asks for more than a quarter of
   # it, even when $MAX_OUTPUT_TOKENS allows far more
