@@ -66,6 +66,12 @@
 - ④ **操作教訓（重現性）**：LiteLLM 必須綁 **0.0.0.0**——harness egress sidecar 在容器內走 `host.docker.internal:4000`→`172.17.0.1`，loopback-only 綁定讓 `model` 階段 FAIL（本次第一次 kit check 死因）；啟動需 `uv run --with "litellm[proxy]" --with websockets`（新版 litellm 純 `litellm` 缺 fastapi／websockets）；`pkill`/`pgrep -f` 的模式會命中工具 wrapper 自己的 command line（兩度 exit 144 自我終止）→ 啟停改放腳本 `/tmp/start_litellm.sh`（模式只存在腳本內）。
 - ⑤ **P2 正式開工**（使用者指示「依 progress.md 逐項完成，主要目標進入第二階段」）：P2-01～P2-04 已補上可重現證據（見 §3）；P2-05 四領域已 2/4（structural×2）→ 補 **EXP-018 `engineers-estimate-check`（電機, light L1, MCP×8）**＝新 gate 碼首戰＋main 路徑 MCP 實戰、**EXP-019 `emergency-spillway-check`（水資源, light L1, MCP×8）**排隊（串行，發射前另立 `.start`）。
 
+**2026-11-22（二十七）— 續跑：P3-04a（`ae07474`）補完驗證——`kitcheck9` 曾被切斷於 `kit` 階段前，重跑 `kitcheck10` 全 7 階段 PASS；chain 全綠、下一發射等使用者選靶：**
+- ① **P3-04a（`ae07474`，14:51，提示單 6 行變因）**：GATE 對「由計數／枚舉得數」的 ledger 值不得只照 ledger 自己引用的記錄重算——必須**自行從來源重新枚舉整個匹配群体**再重算，不符印 `FAIL C<id>: ledger counts <N> but the source holds <M> — <missed or extra records>`（直打 B-5 自審上限：EXP-022 把 2.36 數成 14 EA 正是群体選錯、引用核實查無異常）。harness 機制不動。
+- ② **鏈路恢復**：LiteLLM 曾於 15:09 正常 shutdown（`:4000` 無 listener）→ 以永久腳本重啟；Strata `:8080` 200 model loaded（n_ctx 262,144）、帶 key `GET /v1/models` 200、端到端 `chat/completions` 200（16 tok 全燒 `reasoning_content`、`finish_reason=length`＝判準同 EXP-017 #2 預探）、docker 0 殘留、disk 844 G／RAM 60 G。
+- ③ **HEAD `ae07474` 重驗**：mock 契約 **14/14**（`uv run --with openai==3.26.1 --with websockets==15.0.1`，requirements.txt 兩包）；`kit check --rebuild`：`kitcheck9`（14:53）在 `kit` 階段開始前被切斷（`[FAIL] kit: interrupted`，無結論）→ 15:59 重跑 **`kitcheck10.log`：7 階段全 PASS**（build 29 s 映像 `plebench-serve:d0e1181cef4cb463`／model 7.3 s／listen 1 s／smoke 48 s 5 呼叫／mcp 89 s 14 呼叫），僅慣常 `artifacts` WARN（R-012）。
+- ④ **發射必經狀態**：②`kit check` ✅（kitcheck10）、③判準就緒、①使用者明確同意 ⏳。下一發射同時是 **window_probe 首次 live**（轉錄須見 `context window: 262144 tokens (announced…)`、egress 0 筆 exceeds-context 400，對照 EXP-023 #2 的 116 筆）＋ **P3-04a 首次 live**（看有無 `FAIL C<id>` 線與 fix round）。候選靶（等使用者拍板）：(a) **EXP-023 #3 `emergency-spillway-check` × `ae07474`**＝三點系列第 4 點（0.838→0.919→#2 INVALID→?）、w3 細刻度抗雜訊，且延續被中止的 EXP-023；(b) `engineers-estimate-check` × `ae07474`＝P3-04a 直靶（14-EA 群體錯），但 w10 題 ±0.2 單樣本雜訊；(c) heavy 側補 gate-only 錨 `roof-deck-design`／`eor-review-corrections` × `85d1cbd`（解鎖 heavy 三點對照，2–4 h）。engineers 三岔（(b) 估雜噪／(c) 回退）仍擱置。
+
 **2026-11-22（二十六）— 規則查核（官方 `docs/rules.md` 全文＋ple-bench.com；使用者已登入 Kaggle，但 Kaggle SPA 頁 WebFetch 抓不到內文）——多項既有假設需修正：**
 - ① **賽期＝2026-11-09 → 2027-01-05**（ple-bench.com；獎金 $250k/$100k/$50k）。⇒ P8 排程 01/01–01/06 **超出截止日**，必須在 01/04 前完成提交動作；ADR-004 凍結日 01/01 仍適用的同時，出口項目要前移。
 - ② **entry＝單一 GitHub commit**（`submission.yaml`＋harness＋`artifacts/`），**提交方式官方尚未公告**（"will be announced on the competition site"）→ 「交付演練」目前沒有正式管道；Kaggle 頁面是展示/註冊面則待使用者在瀏覽器確認（Rules/Timeline/Code Entries 三個 tab 抓不到）。
@@ -130,7 +136,7 @@
 
 ### 下一個可執行任務
 
-1. **全部暫停（使用者指示 2026-11-22；離線工不在暫停範圍、已做）**：EXP-023 #2 已中止（INVALID，§6 行；部分轉錄保留、可 `--regrade`）。爆掉問題已以 `window_probe` 修復（§1（二十五）；原「外層帶 `CONTEXT_TOKENS` 環境值」方案作廢——注入鏈路在 live 不存在）。**重新發射前必經**：① 使用者明確同意；② `kit check --rebuild`（新碼變因需官方驗證、映像重建）；③ 判準新增＝轉錄見 `context window: 262144 tokens (announced…)` 且 egress 0 筆 exceeds-context 400。engineers 三岔（(b) 估雜訊／(c) 回退）仍擱置。
+1. **全部暫停（使用者指示 2026-11-22；離線工不在暫停範圍、已做）**：EXP-023 #2 已中止（INVALID，§6 行；部分轉錄保留、可 `--regrade`）。爆掉問題已以 `window_probe` 修復（§1（二十五）；原「外層帶 `CONTEXT_TOKENS` 環境值」方案作廢——注入鏈路在 live 不存在）。**重新發射前必經**：① 使用者明確同意 ⏳；② `kit check --rebuild` ✅ 2026-11-22 15:59（`kitcheck10.log` 7/7、映像 `d0e1181cef4cb463`、含 `window_probe`＋P3-04a 於 HEAD `ae07474`）；③ 判準新增＝轉錄見 `context window: 262144 tokens (announced…)` 且 egress 0 筆 exceeds-context 400。engineers 三岔（(b) 估雜訊／(c) 回退）仍擱置。
 2. **heavy 側 P3 A/B 需先補 gate-only heavy 錨**（一題 heavy 於 `85d1cbd`：含 gate 碼、無 ledger）才能與 P2（`eb918d8`）及 ledger 版三點對照；建議 `roof-deck-design`（checks、中量）或 `eor-review-corrections` 重跑。
 2. **DEF-003 live 驗證**：下一個 heavy 對照 run 帶 `CONTEXT_TOKENS=262144`（僅 dev，不綁宣告模型；R-009），對照 EXP-016/017 尾聲 400 是否消失、收尾自我驗證輪是否保住。
 3. **P3-05 A/B 錨點已立**：0.3673／0.2573（heavy structural，`eb918d8`）＋0.1304／0.8378（light rubric，`85d1cbd`）＝P3 每項改動的同題同參對照基準。
