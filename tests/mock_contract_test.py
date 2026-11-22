@@ -95,6 +95,10 @@ class MockModel(BaseHTTPRequestHandler):
       if case == "empty_cut" and call == 2:
         # all reasoning, no answer, cut at the output limit
         return {"role": "assistant", "content": "", "_finish": "length"}
+      if case == "unfinished" and call == 2:  # one sentence of intent
+        return {"role": "assistant", "content": "I will start by reading."}
+      if "still to do instead" in last:
+        MockModel.flags["pushes"] = MockModel.flags.get("pushes", 0) + 1
       if "ran past the output limit" in last:
         MockModel.flags["saw_empty_cut"] = True
       if "continue where it stopped" in last:
@@ -111,6 +115,12 @@ class MockModel(BaseHTTPRequestHandler):
         if "inside a tool call" in last:
           MockModel.flags["saw_call_cut"] = True
         call -= 1  # then as clean
+      if case == "unfinished":  # a summary that lists the work still to do
+        if call == 2:
+          return {"role": "assistant", "content":
+                  "Parsed the inputs.\n\n**Next Steps:**\n* write out.txt"}
+        if "still to do instead" in last:
+          MockModel.flags["pushes"] = MockModel.flags.get("pushes", 0) + 1
       if case == "args_cut" and call == 1:  # a long file through a call
         return self.tool(
             "write_file", {"path": "/app/out.txt", "content": "x" * 30000}
@@ -454,6 +464,7 @@ async def main():
   ev, _ = await run_case("clean", {"MOCK_CASE": "clean"}, {})
   check(ev, log_in=("phase: plan", "phase: work", "phase: gate 1",
                     "gate: script ready", "verdict: PASS"),
+        log_not_in=("reply announces work",),
         final_in=("summary: /app/out.txt",), name="clean")
 
   # fix_round: the scripted mechanical check lists a gap once and the
@@ -624,6 +635,15 @@ async def main():
   assert MockModel.flags.get("saw_args_cut"), "args_cut: arguments not cut"
   assert not MockModel.flags.get("bad_args"), "args_cut: invalid arguments"
   check(ev, log_in=("context budget: cut",), name="args_cut")
+
+  # unfinished: a planner reply of one sentence of intent and a worker
+  # summary listing "Next steps" are each sent back once to do the work;
+  # the clean run's plan and summary are never sent back
+  ev, _ = await run_case("unfinished", {"MOCK_CASE": "unfinished"}, {})
+  pushes = MockModel.flags.get("pushes", 0)
+  assert pushes == 2, f"unfinished: {pushes} replies sent back, want 2"
+  check(ev, log_in=("reply announces work still to do",),
+        final_in=("summary: /app/out.txt",), name="unfinished")
 
   # out_cap: with a known window, no call asks for more than a quarter of
   # it, even when $MAX_OUTPUT_TOKENS allows far more

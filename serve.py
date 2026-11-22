@@ -130,6 +130,24 @@ CALL_CUT = (
     " or script in parts (write the first part, then append the rest), and"
     " keep your reasoning short."
 )
+# a reply without a tool call that only announces work ("I will start by...",
+# or a final summary listing "Next steps") is not an answer: EXP-027 #2's
+# worker stopped on such a summary before writing any deliverable, and its
+# planner and verifier answered one sentence of intent. Each step pushes back
+# at most MAX_PUSHES times, then takes the reply as it is.
+INTENT = re.compile(
+    r"\s*(?:now,?\s+)?(?:I will|I'll|let me|I am going to|I'm going to)\b",
+    re.I,
+)
+INTENT_CHARS = 800  # an announcement is short; a real plan or answer is not
+NEXT_STEPS = re.compile(
+    r"^\W*(?:next steps?|remaining (?:steps|work)|still to do)\b", re.I | re.M
+)
+MAX_PUSHES = 2
+UNFINISHED = (
+    "You described work that is still to do instead of doing it. Do it now"
+    " with your tools, and reply without a tool call only once it is done."
+)
 # Claude caches a prompt prefix only when marked with cache_control. Each call
 # marks the system prompt and the latest message (using 2 of Claude's 4 cache
 # breakpoints) so each turn reads the prior conversation from cache. Other
@@ -651,6 +669,23 @@ async def shorten(session, messages, tag="context full"):
   return True
 
 
+def unfinished(text, final):
+  """Whether a reply without a tool call only announces work still to do.
+
+  Args:
+    text: The reply's content.
+    final: Whether the step's answer is the worker's summary, where a "Next
+      steps" list means the deliverables are not done yet.
+
+  Returns:
+    True for a short reply opening with an intent ("I will...", "Let
+    me..."), or a final summary with a "Next steps" heading.
+  """
+  if INTENT.match(text) and len(text) < INTENT_CHARS:
+    return True
+  return final and bool(NEXT_STEPS.search(text))
+
+
 def gate_script(reply):
   """Extracts the gate agent's Python acceptance check from its reply.
 
@@ -792,6 +827,7 @@ async def agent(session, messages, tools, until, final=False):
   """
   # head: the start of an answer cut off at the output limit
   nudges, head, waits = 0, "", iter(RETRY_WAITS)
+  pushes = 0  # replies sent back for announcing work instead of doing it
   while True:
     left = session.time_left()  # None when the task has no time limit
     wrap_up = left is not None and left < until
@@ -889,6 +925,16 @@ async def agent(session, messages, tools, until, final=False):
         # a fix round, or the request to go on after a cut-off reply, continues
         # from this answer
         messages.append(turn)
+      if (
+          not wrap_up and not cut and pushes < MAX_PUSHES
+          and unfinished(message.content or "", final)
+      ):
+        pushes, nudges, head = pushes + 1, 0, ""
+        await session.log(
+            "reply announces work still to do; asking to do it"
+        )
+        messages.append({"role": "user", "content": UNFINISHED})
+        continue
       if wrap_up or (message.content and not cut) or nudges == MAX_NUDGES:
         return text
       nudges, head = nudges + 1, text
