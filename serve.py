@@ -80,9 +80,9 @@ CONTEXT_FULL = re.compile(
 CUT_KEEP = 1000  # characters a tool result keeps once the context is full
 # DEF-003: a proactive context budget. $CONTEXT_TOKENS pins the endpoint's
 # window (0: learn it from the endpoint once, see window_probe; if that
-# also fails, keep only the reactive post-400 cut). The serve container
-# receives no arbitrary host variables -- only submission.yaml's env --
-# so learning the window from the endpoint is what lets development
+# also fails, from the first 400 overflow, see learn_window). The serve
+# container receives no arbitrary host variables -- only submission.yaml's
+# env -- so learning the window from the endpoint is what lets development
 # (local stand-in) and production (declared model) share one entry with
 # no pinned constant. A call goes out only once the conversation plus its
 # reply budget fits the window minus $CTX_MARGIN_TOKENS; 0: a margin of
@@ -409,6 +409,7 @@ async def recover(session, messages, exc, waits, until):
   """
   status = getattr(exc, "status_code", None)  # None: no HTTP answer
   if status == 400 and CONTEXT_FULL.search(str(exc)):
+    await learn_window(session, messages)
     return await shorten(session, messages)
   wait = next(waits, None)
   if wait is None or not (
@@ -484,6 +485,31 @@ async def window_probe(session):
   CONTEXT_TOKENS = win
   await session.log(
       f"context window: {win} tokens (announced by the endpoint)"
+  )
+
+
+async def learn_window(session, messages):
+  """Takes the size of a prompt the endpoint refused as the context window.
+
+  The endpoint said this conversation does not fit, so its window is at
+  most `est_tokens(messages)`. Keeping that as `CONTEXT_TOKENS` arms the
+  proactive budget for the rest of the task, so one overflow per serve
+  process replaces one per step (and per refilled context). The value is in
+  `est_tokens` units, which calibrates the chars/4 estimate to the real
+  tokenizer for free. A known window is only ever lowered: an overflow
+  under it means the estimate ran low.
+
+  Args:
+    session: Active `taskbridge.Session` for the task.
+    messages: The conversation the endpoint just refused, before shortening.
+  """
+  global CONTEXT_TOKENS
+  seen = est_tokens(messages)
+  if CONTEXT_TOKENS and seen >= CONTEXT_TOKENS:
+    return
+  CONTEXT_TOKENS = seen
+  await session.log(
+      f"context window: learned {seen} tokens from an overflow"
   )
 
 

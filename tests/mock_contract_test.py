@@ -5,7 +5,7 @@ Run from the harness folder:
   uv run --no-project --python 3.12 --with websockets,openai \
     python tests/mock_contract_test.py
 
-Fourteen scenarios assert the P1 exit conditions (bounded ends under
+Fifteen scenarios assert the P1 exit conditions (bounded ends under
 faults) plus the protocol contract:
 
   clean         scripted plan/work/gate PASS    -> done, phases logged
@@ -22,6 +22,7 @@ faults) plus the protocol contract:
   gate_exec     check prints no verdict lines   -> reviewer takes the round
   ctx_budget    tiny $CONTEXT_TOKENS window     -> results cut before call
   ctx_discover  window announced on /v1/models  -> budget arms itself
+  ctx_learn     window unknown, size-based 400  -> learned once, then cut
 """
 
 import asyncio
@@ -154,6 +155,24 @@ class MockModel(BaseHTTPRequestHandler):
           }
       }).encode()
       self.send_response(int(os.environ.get("MOCK_FAIL_STATUS", "500")))
+      self.send_header("Content-Type", "application/json")
+      self.send_header("Content-Length", str(len(body)))
+      self.end_headers()
+      self.wfile.write(body)
+      return
+    # $MOCK_CTX_LIMIT refuses any prompt over that many chars/4 the way
+    # Ollama words it, counting each refusal (0 disables)
+    limit = int(os.environ.get("MOCK_CTX_LIMIT", "0"))
+    size = len(json.dumps(request.get("messages") or [],
+                          ensure_ascii=False)) // 4
+    if limit and size > limit:
+      MockModel.flags["overflows"] = MockModel.flags.get("overflows", 0) + 1
+      body = json.dumps({"error": {
+          "message": "the prompt is longer than the context length"
+                     " currently available to the model",
+          "type": "invalid_request_error",
+      }}).encode()
+      self.send_response(400)
       self.send_header("Content-Type", "application/json")
       self.send_header("Content-Length", str(len(body)))
       self.end_headers()
@@ -311,7 +330,7 @@ async def run_case(name, env_add, cfg, api_key="mock-test-key"):
   m_port, s_port = free_port(), free_port()
   for key in (
       "MOCK_CASE", "MOCK_FAIL_FROM", "MOCK_FAIL_TO", "MOCK_FAIL_STATUS",
-      "MOCK_FAIL_BODY", "MOCK_DELAY", "MOCK_WINDOW",
+      "MOCK_FAIL_BODY", "MOCK_DELAY", "MOCK_WINDOW", "MOCK_CTX_LIMIT",
   ):
     if key in env_add:
       os.environ[key] = str(env_add[key])
@@ -476,6 +495,23 @@ async def main():
   )
   check(ev, log_in=("context window: 1500 tokens", "context budget: cut"),
         log_not_in=("context full: cut",), name="ctx_discover")
+
+  # ctx_learn: no window anywhere (neither $CONTEXT_TOKENS nor /v1/models);
+  # the endpoint refuses oversized prompts with Ollama's 400. Two steps
+  # (planner, then the fallback reviewer) each read a long tool result:
+  # the first refusal teaches the window, so the second step is cut before
+  # its call and the endpoint refuses exactly once
+  ev, _ = await run_case(
+      "ctx_learn",
+      {"MOCK_CASE": "gate_fallback", "MOCK_CTX_LIMIT": "3000",
+       "CTX_MARGIN_TOKENS": "100", "MAX_OUTPUT_TOKENS": "1000"},
+      {"exec_output_chars": 30000},
+  )
+  overflows = MockModel.flags.get("overflows", 0)
+  assert overflows == 1, f"ctx_learn: endpoint refused {overflows} times"
+  check(ev, log_in=("context window: learned", "context full: cut",
+                    "context budget: cut", "phase: verify 1"),
+        name="ctx_learn")
 
   # cancel: done must arrive within the evaluator's 10 s window
   ev, _ = await run_case("cancel", {"MOCK_CASE": "cancel"},
