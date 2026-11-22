@@ -20,6 +20,7 @@
 - **WSL 舊 repo `~/projects/ple-solo-harness`（及 `-quick` worktree）停止使用**，保留不刪作備份；不得再在那裡 commit，否則兩邊分岔。
 - **執行面仍在 WSL `Ubuntu`**：Docker、Harbor、uv、官方 kit（`~/projects/ple-reference`）、資料（`~/projects/ple-data`）、`local.env`、LiteLLM（`~/projects/model_proxy`）、run 目錄都不動。Windows 端以 `C:\Program Files\WSL\wsl.exe -d Ubuntu -u zivkao -e bash -c '...'` 驅動，`kit check`／`eval/run.py` 的 entry 參數改用 `/mnt/d/project/vide-coding/ple-solo-harness`。Windows 本身沒有 uv／Docker。
 - **模型**：Windows 本機 Ollama 0.40.17（`127.0.0.1:11434`，WSL mirrored loopback 可直達）。見 §1（二十九）。
+- **磁碟防護（R-016）**：WSL 虛擬磁碟在 D 槽、只長不縮。每次發射前 `bash ~/projects/disk_guard.sh 40 || exit 1`；監控一律用 `~/projects/watch_run_disk.sh <python_pid> <log> 10`；Docker 建置快取上限 20 GB（`/etc/docker/daemon.json`）。
 
 ### 2026-11-19 — 最終環境與通訊架構（Agent 必讀；canonical repo 與 Claude 控制面兩條已被上方 11-22 版取代）
 
@@ -471,6 +472,7 @@ Failure taxonomy：`BOOT / PROTOCOL / MODEL / TOOL / MCP / FILE / FORMAT / CALCU
 | R-012 | dev artifacts 由本機 strata（透過 `claude-opus-5-5` 別名）產生，而 entry 宣告模型是 `google-cloud/claude-opus-5-5`；官方規則「Call only the model you declared」 | 若把 strata 產物直接匯入 `artifacts/` 提交，與宣告模型不符，違反 fair-play 且 manifest 記錄 `model_api=claude-opus-5-5` | Solo | 本地 strata 只用於迴圈驗證與 P1 對照（維持 `--no-export`）；產生正式 artifacts 前把 proxy 上游換回真 Vertex（`aiplatform` API 目前 DISABLED，需先開通）後重跑 dev set。**2026-11-22 依 Kaggle Overview 修正：官方明文允許本機／個人 API 模型產生 `artifacts/` 後再切換 `model_api`（不取消資格），條件＝Writeup 註明本機模型與 judge ⇒ 本風險的前提不成立；剩餘風險轉由 R-014 追蹤** | MITIGATED |
 | R-013 | 官方必要檔列「`serve.py`, `harness.py`」（另處寫作 `serve.py / harness.py`），本 repo 無 `harness.py`（入口為 `serve.py`＋`taskbridge.py`） | 若實為必要檔，Stage 1 資格檢查不過 | Solo | 對照官方 `submission-template`／sample_submissions 與 `kit check` 判定；必要時加 `harness.py`（不動核心邏輯） | OPEN |
 | R-014 | Stage 2 會以宣告模型「re-runs a random dev sample live」做重現性檢查（失敗或 hard-code 即 DQ），未說明與已提交 artifacts 分數的容差 | 若 artifacts 由本機模型產生、即時重跑換成宣告模型，分數／產物差異大，可能被判重現性不符 | Solo | 最終 `artifacts/` 以目標 `google-cloud/<id>` 模型重產；或向官方 Discussion 確認容差 | OPEN |
+| R-016 | WSL 虛擬磁碟 `D:\WSL\Ubuntu\ext4.vhdx` 放在 D 槽（931.5 GB，大部分是個人資料），動態 VHDX 只長不縮 | D 槽塞滿時 WSL 整個 I/O error，進行中的 run 失效（2026-11-22 EXP-025 #1） | Solo | **根因**：Linux 看到 1 TB 虛擬磁碟，BuildKit 依此推算的快取清理上限遠大於 D 槽實際剩餘，且未設 `daemon.json`，建置快取堆到 145 GB。**已上三道防護（2026-11-22）**：① `/etc/docker/daemon.json` `builder.gc` `defaultKeepStorage: 20GB`（`docker buildx inspect` 確認 Reserved Space 20GiB）；② `~/projects/disk_guard.sh [min=40]`：以 `/mnt/d/...`（drvfs，反映 D 槽真實剩餘）檢查，不足即拒絕發射，每個 `.start` 開頭呼叫；③ `~/projects/watch_run_disk.sh <pid> <log> [min=10]`：取代舊 watcher，每 60 s 檢查 D 槽，跌破門檻即 TERM 該 run（Harbor 會取消 trial 並清容器）。需要還空間給 Windows 時仍走 `fstrim`→`wsl --shutdown`→系統管理員 `Optimize-VHD -Mode Full`；sparse 維持關閉 | MITIGATED |
 | R-015 | Stage 2 依「平均分×平均成本」Pareto 前緣排名，平均分 ≥0.138 才有獎項資格；每題容器 2 CPU／4 GB RAM | 成本與資源占用直接影響名次；harness 若在 4 GB 內 OOM 即該題 0 分 | Solo | P6 納入 token／成本報告與 score-vs-cost 曲線；本機評測確認容器資源限制與 Stage 2 一致 | OPEN |
 | R-011 | Windows→WSL 的 TCP bridge（`forwarder.py`）會失活，導致上游 `Connection error` | 評測期間模型呼叫全部 500，smoke 600 s 內 0 次成功呼叫 | Solo | 已改寫為 supervisor 版：用 `Get-NetIPAddress` 偵測 `vEthernet (WSL*)`/`vEthernet (Default Switch*)` 並逐個 bind，每 300 s 重新檢查並自動 rebind。2026-11-18 換 distro 後 bridge 又失活一次，重啟後（pid 2632）自動綁上新位址 `172.23.0.1` 與 `172.23.80.1`（Default Switch 網段已從 `172.26.128.1` 改變），新 distro 全鏈路再次 200。排程方案失敗：`schtasks /create`（cmd 與 `Register-ScheduledTask` 兩種）一律回「存取被拒」，代表本機群組原則禁止一般使用者建立排程工作（已確認 `PLE_Model_Bridge` 不存在）。改用等價方案：HKCU 啟動鍵 `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\PLE_Model_Bridge = pwsh -File start-watchdog.ps1`（已寫入並回讀確認），開機後由 `watchdog.ps1`（30 s 巡邏、必要時重啟 `forwarder.py`）負責保活；目前 forwarder pid 2632、watchdog pid 28964 在跑。 | MONITOR |
 
@@ -534,6 +536,14 @@ Failure taxonomy：`BOOT / PROTOCOL / MODEL / TOOL / MCP / FILE / FORMAT / CALCU
 ---
 
 ## 12. Incident log
+
+### 2026-11-22 — D 槽塞滿 → WSL I/O error，EXP-025 #1 中斷（R-016）
+
+- **症狀**：EXP-025 #1（三題 light、`10513ac`）19:38 發射，20:04 python 結束；之後 WSL 內 `execvpe(bash) failed: I/O error`、`df: Input/output error`、`Bus error`。EXP-025 #1 **一題都沒跑**：死在建置 `backfeed-energization-reply` 的 verifier 映像（`plan-verify-20261122-193919`，INVALID，無分數）。
+- **根因**：Ubuntu 的虛擬磁碟 `D:\WSL\Ubuntu\ext4.vhdx`（動態 VHDX，只長不縮）長到 **169.9 GB**，D 槽（931.5 GB，大部分是個人資料夾）**剩 0 GB**。一小時前 D 槽還有 28 GB；新題目的映像建置＋Docker 建置快取（144.9 GB，其中 85 GB 可回收）把它吃完。
+- **處置（使用者核准）**：① 刪 `D:\ple-migration\old-distro-projects.tar`（11/18 搬遷用，1.5 GB；工具禁止刪 D 槽根目錄下的資料夾本身，空資料夾保留）；② `wsl --terminate` 後啟動失敗（`Wsl/Service/CreateInstance/E_FAIL`、錯誤碼 6、失敗步驟 2），改 `wsl --shutdown` 重開 VM 才恢復；③ `docker builder prune -f`＋`docker image prune -f` 回收 85 GB（題目映像保留），WSL 內 168 GB → 89 GB；④ `--set-sparse true`＋root `fstrim` 只回收 0.6 GB，而且 sparse 檔會讓 `Optimize-VHD` 拒絕執行 → `--set-sparse false`；⑤ 使用者以系統管理員執行 `Optimize-VHD -Path D:\WSL\Ubuntu\ext4.vhdx -Mode Full` → **vhdx 92.3 GB、D 槽空 79.1 GB**。
+- **恢復驗證**：WSL `df` 89 G／1007 G、docker active、LiteLLM 重啟後 Gemma 端到端 200、repo 乾淨（`10513ac`）。核心 log 沒看到 ext4 錯誤。
+- **教訓**：(a) 動態 VHDX 在 Linux 內刪檔不會還空間給 Windows，要 `fstrim`→`wsl --shutdown`→系統管理員 `Optimize-VHD -Mode Full`；(b) WSL 的 sparse 是實驗功能，回收很少又會擋住 `Optimize-VHD`，維持關閉；(c) 新題目第一次跑會建很大的映像，發射前要確認 D 槽空間（見 R-016）；(d) 本 session 不是系統管理員，壓縮必須請使用者執行。
 
 ### 2026-11-16 — WSL 環境故障（R-007）
 
