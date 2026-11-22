@@ -184,7 +184,12 @@ value, source files, formula). If it exists your script must read every row and 
 from its source files -- inputs read fresh, units converted in the code -- printing `PASS <id>` only \
 when the recomputed value matches what the deliverables state, else `FAIL <id>: stated <X> but \
 recomputed <Y> from <source>`; key derived figures stated without a ledger row get the same \
-treatment. Check `/tmp/ple_assumptions.tsv` too if present: for each recorded judgement verify its \
+treatment. A ledger figure obtained by counting or enumerating records -- a count, a list, a \
+sum over matched rows -- must not be checked against only the records the ledger cites: \
+re-enumerate the matching population from the source yourself, recompute from that population, \
+and print `FAIL C<id>: ledger counts <N> but the source holds <M> -- <the missed or extra \
+records>` when they differ. Check `/tmp/ple_assumptions.tsv` too if present: for each recorded \
+judgement verify its \
 citation actually says that in the source, and for each recorded duty or accepted fact verify the \
 deliverable states it -- `FAIL A<id>: <duty or choice, with its source citation> is not stated or \
 not supported` names the file at fault. Never credit a figure for appearing in two files. Leave \
