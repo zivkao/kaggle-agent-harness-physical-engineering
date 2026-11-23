@@ -135,6 +135,8 @@ class MockModel(BaseHTTPRequestHandler):
         )
       return {"role": "assistant", "content": "summary: /app/out.txt written"}
     if role == "gate":
+      if "No module named 'pandas'" in last:  # the runtime repair turn
+        MockModel.flags["saw_run_repair"] = True
       if case == "gate_fallback":  # prose instead of a script
         return {"role": "assistant", "content": "I could not write a script"}
       if case == "gate_fence":  # the script itself checks for a fence
@@ -605,8 +607,24 @@ async def main():
   ev, _ = await run_case("gate_exec", {"MOCK_CASE": "clean"},
                          {"gate_fail_exec": True})
   check(ev, log_in=("phase: gate 1", "gate: no verdict lines",
+                    "gate: script failed to run; asking for a fix",
                     "phase: verify 1"),
         log_not_in=("phase: gate 2",), name="gate_exec")
+
+  # gate_crash: the script stops at a module the container lacks (EXP-028
+  # #3/#4: pandas); its traceback goes back to the gate once, the fixed
+  # script runs and its verdict stands, so no reviewer is needed
+  ev, _ = await run_case(
+      "gate_crash", {"MOCK_CASE": "clean"},
+      {"gate_outs": ["Traceback (most recent call last):\n  File"
+                     " \"/tmp/ple_gate.py\", line 4, in <module>\n"
+                     "ModuleNotFoundError: No module named 'pandas'",
+                     "PASS scripted-ok"]},
+  )
+  assert MockModel.flags.get("saw_run_repair"), "gate_crash: no traceback"
+  check(ev, log_in=("gate: script failed to run; asking for a fix",
+                    "gate: fixed script ready", "verdict: PASS"),
+        log_not_in=("phase: verify 1",), name="gate_crash")
 
   # retry_429: six 429s exhaust the SDK, recover() retries once more
   ev, _ = await run_case(

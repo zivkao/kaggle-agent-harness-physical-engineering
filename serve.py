@@ -254,6 +254,17 @@ if added or changed:
 '''
 GUARD_FILE_MB = 50
 GUARD_TOTAL_MB = 1000
+# lines of a crashed gate script's output sent back in its repair turn
+GATE_CRASH_LINES = 15
+# sent once when the gate's script ran but gave no verdict (EXP-028 #3/#4:
+# four scripts compiled, then stopped at `import pandas`, which the task
+# container does not have)
+GATE_RUN_REPAIR = (
+    "Your script ran in the task container but {why}\n\nFix it -- use only"
+    " the standard library and modules you have checked import there -- and"
+    " reply with the whole corrected script in one fenced code block and"
+    " nothing else."
+)
 # sent once when the gate's script does not compile
 GATE_REPAIR = (
     "Your script does not compile ({why}). Reply with the whole corrected"
@@ -324,7 +335,8 @@ delivery is accepted. The task and a plan follow; an engineer has already produc
 deliverables with your tools (bash starts in {workdir}), but do not create or change any file under the \
 task folders (scratch files may live in /tmp). Reply with a single Python 3 script in one fenced code \
 block and nothing else. The script runs as `python3` inside the task container: it may read any task \
-file, write only under /tmp, prints one line per hard requirement the task states -- `PASS <id>` when it \
+file, write only under /tmp, import only the standard library and modules you have checked import there \
+(`python3 -c 'import openpyxl'`), prints one line per hard requirement the task states -- `PASS <id>` when it \
 holds, `FAIL <id>: <what is wrong, and in which file and row>` when it does not -- cheapest checks first, \
 and exits 0 either way. Cover every mechanically checkable requirement: each required file at its exact \
 path (inside an archive, at its exact entry path, top level unless the task says otherwise), table headers, column names and column order, value formats such as drawing-number and \
@@ -892,17 +904,19 @@ async def gate_run(session, script):
     script: Python source of the gate check.
 
   Returns:
-    "PASS" when no printed line starts with FAIL, the FAIL lines (capped
-    to `GATE_MAX_FAILS` lines and `GATE_GAP_CHARS` characters) as the gap
-    list when some do, or None when the run printed no verdict lines or a
-    FAIL line shows the check's own tooling is missing (`CHECK_BROKE`).
+    `(verdict, crash)`. `verdict` is "PASS" when no printed line starts
+    with FAIL, the FAIL lines (capped to `GATE_MAX_FAILS` lines and
+    `GATE_GAP_CHARS` characters) as the gap list when some do, or None
+    when the run printed no verdict lines or a FAIL line shows the check's
+    own tooling is missing (`CHECK_BROKE`); `crash` then says what the
+    script printed, for the gate's repair turn ("" otherwise).
   """
   try:
     await session.write_file(GATE_PATH, script)
     result = await session.exec(f"python3 {GATE_PATH}")
   except taskbridge.TaskError as exc:
     await session.log(safe(f"gate: run error ({str(exc)[:200]})"))
-    return None
+    return None, f"the run failed: {str(exc)[:500]}"
   lines = [ln.strip() for ln in (result["output"] or "").splitlines()]
   fails = [ln for ln in lines if ln.upper().startswith("FAIL")]
   passes = [ln for ln in lines if ln.upper().startswith("PASS")]
@@ -914,16 +928,20 @@ async def gate_run(session, script):
             f" {tail})"
         )
     )
-    return None
+    shown = "\n".join(lines[-GATE_CRASH_LINES:])[-GATE_GAP_CHARS:]
+    return None, (
+        f"it exited {result['exit_code']} without printing any PASS or"
+        f" FAIL line; its last output:\n{shown}"
+    )
   if not fails:
-    return "PASS"
+    return "PASS", ""
   broke = [ln for ln in fails if CHECK_BROKE.search(ln)]
   if broke:
     await session.log(
         safe(f"gate: check itself failed ({broke[0][:200]})")
     )
-    return None
-  return "\n".join(fails[:GATE_MAX_FAILS])[:GATE_GAP_CHARS]
+    return None, f"its own tooling is missing:\n{broke[0][:500]}"
+  return "\n".join(fails[:GATE_MAX_FAILS])[:GATE_GAP_CHARS], ""
 
 
 def conversation(system, session, prompt):
@@ -1207,6 +1225,8 @@ async def solve(session):
   # role and rerun every round; only when no usable check exists does the
   # read-only verifier check by hand for that round.
   check_script = None
+  gating = None  # the conversation that wrote check_script
+  run_fixed = False  # check_script already had its runtime repair turn
   for round_num in range(1, MAX_FIX_ROUNDS + 1):
     if not time_for(until(CHECK_SHARE / 2)):
       break
@@ -1222,7 +1242,7 @@ async def solve(session):
         reply = await agent(
             session, gating, READ_ONLY + extra, until(CHECK_SHARE / 2)
         )
-        check_script = gate_script(reply)
+        check_script, run_fixed = gate_script(reply), False
         why = "" if check_script else gate_why(reply)
         # one repair turn for a script that does not compile (EXP-028 #1:
         # both gate scripts lost to one unterminated string each)
@@ -1240,9 +1260,33 @@ async def solve(session):
             "gate: script ready" if check_script else
             safe(f"gate: no usable script ({why})")
         )
-      verdict = (
-          await gate_run(session, check_script) if check_script else None
+      verdict, crash = (
+          await gate_run(session, check_script) if check_script
+          else (None, "")
       )
+      # one repair turn for a script that runs but gives no verdict
+      if (
+          crash and gating is not None and not run_fixed
+          and time_for(until(CHECK_SHARE / 4))
+      ):
+        run_fixed = True
+        await session.log(safe(
+            f"gate: script failed to run; asking for a fix ({crash[:200]})"
+        ))
+        gating.append(
+            {"role": "user", "content": GATE_RUN_REPAIR.format(why=crash)}
+        )
+        reply = await agent(
+            session, gating, READ_ONLY + extra, until(CHECK_SHARE / 2)
+        )
+        fixed = gate_script(reply)
+        await session.log(
+            "gate: fixed script ready" if fixed else
+            safe(f"gate: no usable fixed script ({gate_why(reply)})")
+        )
+        if fixed:
+          check_script = fixed
+          verdict, crash = await gate_run(session, check_script)
       if verdict is None:
         if check_script is not None:
           # a check with no verdict lines, or broken tooling, is not rerun
