@@ -137,6 +137,11 @@ class MockModel(BaseHTTPRequestHandler):
     if role == "gate":
       if case == "gate_fallback":  # prose instead of a script
         return {"role": "assistant", "content": "I could not write a script"}
+      if case == "gate_repair" and "does not compile" not in last:
+        return {  # an unterminated string, as EXP-028 #1's gate wrote
+            "role": "assistant",
+            "content": "```python\nimport os\nprint('PASS scripted-ok)\n```",
+        }
       return {
           "role": "assistant",
           "content": "```python\nprint('PASS scripted-ok')\n```",
@@ -636,6 +641,14 @@ async def main():
   assert MockModel.flags.get("saw_args_cut"), "args_cut: arguments not cut"
   assert not MockModel.flags.get("bad_args"), "args_cut: invalid arguments"
   check(ev, log_in=("context budget: cut",), name="args_cut")
+
+  # gate_repair: a gate script that does not compile gets one repair turn
+  # naming the error and its line; the corrected script then runs
+  ev, _ = await run_case("gate_repair", {"MOCK_CASE": "gate_repair"}, {})
+  check(ev, log_in=("gate: script does not compile (code block: SyntaxError",
+                    "at line 2: \"print('PASS scripted-ok)\"",
+                    "gate: script ready", "verdict: PASS"),
+        name="gate_repair")
 
   # unfinished: a planner reply of one sentence of intent and a worker
   # summary listing "Next steps" are each sent back once to do the work;

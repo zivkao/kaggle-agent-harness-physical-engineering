@@ -168,6 +168,11 @@ GATE_PATH = "/tmp/ple_gate.py"
 GATE_MAX_FAILS = 30
 GATE_GAP_CHARS = 4000
 GATE_SCRIPT_CHARS = 60_000
+# sent once when the gate's script does not compile
+GATE_REPAIR = (
+    "Your script does not compile ({why}). Reply with the whole corrected"
+    " script in one fenced code block and nothing else."
+)
 # A FAIL line saying the check's own tooling is missing (a bare command or a
 # Python module, not a deliverable path) reports a broken check, not a gap
 # in the files: EXP-024's gate called `strings`, absent from the container,
@@ -728,9 +733,13 @@ def gate_why(reply):
     return f"{where}: {len(body)} chars, over {GATE_SCRIPT_CHARS}"
   try:
     compile(body, "ple_gate", "exec")
-  except (SyntaxError, ValueError) as exc:
-    error = f"{type(exc).__name__} {str(exc)[:120]}"
-    return f"{where}: {error}; starts {body[:80]!r}"
+  except SyntaxError as exc:
+    lines = body.splitlines()
+    n = exc.lineno or 0
+    line = lines[n - 1].strip()[:120] if 0 < n <= len(lines) else ""
+    return f"{where}: SyntaxError {exc.msg} at line {n}: {line!r}"
+  except ValueError as exc:
+    return f"{where}: ValueError {str(exc)[:120]}"
   return "ok"
 
 
@@ -1062,16 +1071,27 @@ async def solve(session):
       break
     await session.log(f"phase: gate {round_num}")
     if check_script is None and time_for(until(CHECK_SHARE / 4)):
+      gating = conversation(
+          GATE, session, f"## Task\n{task}\n\n## Plan\n{plan}"
+      )
       reply = await agent(
-          session,
-          conversation(GATE, session, f"## Task\n{task}\n\n## Plan\n{plan}"),
-          READ_ONLY + extra,
-          until(CHECK_SHARE / 2),
+          session, gating, READ_ONLY + extra, until(CHECK_SHARE / 2)
       )
       check_script = gate_script(reply)
+      why = "" if check_script else gate_why(reply)
+      # one repair turn for a script that does not compile (EXP-028 #1: both
+      # gate scripts lost to one unterminated string each)
+      if "SyntaxError" in why and time_for(until(CHECK_SHARE / 4)):
+        await session.log(safe(f"gate: script does not compile ({why})"))
+        gating.append({"role": "user", "content": GATE_REPAIR.format(why=why)})
+        reply = await agent(
+            session, gating, READ_ONLY + extra, until(CHECK_SHARE / 2)
+        )
+        check_script = gate_script(reply)
+        why = "" if check_script else gate_why(reply)
       await session.log(
           "gate: script ready" if check_script else
-          safe(f"gate: no usable script ({gate_why(reply)})")
+          safe(f"gate: no usable script ({why})")
       )
     verdict = (
         await gate_run(session, check_script) if check_script else None
