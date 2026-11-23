@@ -44,6 +44,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 
 import openai
 import taskbridge
@@ -168,6 +169,91 @@ GATE_PATH = "/tmp/ple_gate.py"
 GATE_MAX_FAILS = 30
 GATE_GAP_CHARS = 4000
 GATE_SCRIPT_CHARS = 60_000
+# The check roles (gate, its script, verifier) must not change the
+# deliverables, but their tools can (EXP-026 #3: the gate script ran
+# `zip -u` and added duplicates to submission.zip; EXP-028 #1: the gate
+# wrote acceptance_check.py into the task folder). GUARD snapshots the
+# workdir before the check and afterwards removes what is new and restores
+# what changed. Files over GUARD_FILE_MB, or past GUARD_TOTAL_MB in all,
+# are only compared (named in the log if changed, not restored).
+GUARD_PATH = "/tmp/ple_guard.py"
+GUARD = r'''
+import json, os, sys, tarfile
+root, mode = sys.argv[1], sys.argv[2]
+snap = os.environ.get("PLE_GUARD_SNAP", "/tmp/ple_check_snap")
+one, total_cap = int(sys.argv[3]) << 20, int(sys.argv[4]) << 20
+
+def walk():
+  files, dirs = {}, set()
+  for d, subdirs, names in os.walk(root):
+    dirs.add(d)
+    for name in names:
+      p = os.path.join(d, name)
+      try:
+        st = os.lstat(p)
+      except OSError:
+        continue
+      files[p] = [st.st_size, st.st_mtime_ns]
+  return files, dirs
+
+if mode == "save":
+  files, dirs = walk()
+  kept, total = [], 0
+  with tarfile.open(snap + ".tar", "w") as tar:
+    for p, (size, _) in sorted(files.items()):
+      if size <= one and total + size <= total_cap:
+        try:
+          tar.add(p, recursive=False)
+        except OSError:
+          continue
+        kept.append(p)
+        total += size
+  with open(snap + ".json", "w") as f:
+    json.dump({"files": files, "dirs": sorted(dirs), "kept": kept}, f)
+  sys.exit(0)
+try:
+  with open(snap + ".json") as f:
+    saved = json.load(f)
+except OSError:
+  sys.exit(0)
+old, kept = saved["files"], set(saved["kept"])
+files, dirs = walk()
+added = [p for p in files if p not in old]
+changed = [p for p in old if files.get(p) != old[p]]
+for p in added:
+  try:
+    os.remove(p)
+  except OSError:
+    pass
+for d in sorted(dirs - set(saved["dirs"]), key=len, reverse=True):
+  try:
+    os.rmdir(d)
+  except OSError:
+    pass
+back = [p for p in changed if p in kept]
+trusted = hasattr(tarfile, "fully_trusted_filter")
+kw = {"filter": "fully_trusted"} if trusted else {}
+with tarfile.open(snap + ".tar") as tar:
+  for p in back:
+    try:
+      tar.extract(tar.getmember(p.lstrip("/")), "/", **kw)
+      os.utime(p, ns=(old[p][1], old[p][1]))  # tar keeps mtime as a float
+    except (KeyError, OSError):
+      pass
+for ext in (".json", ".tar"):  # a snapshot is used once
+  try:
+    os.remove(snap + ext)
+  except OSError:
+    pass
+lost = [p for p in changed if p not in kept]
+if added or changed:
+  note = f", could not restore {len(lost)} (too big): {lost[:3]}"
+  print(f"undid the check's writes under {root}: removed {len(added)} new"
+        f" file(s), restored {len(back)} changed or deleted"
+        + (note if lost else "") + f"; e.g. {(added + changed)[:3]}")
+'''
+GUARD_FILE_MB = 50
+GUARD_TOTAL_MB = 1000
 # sent once when the gate's script does not compile
 GATE_REPAIR = (
     "Your script does not compile ({why}). Reply with the whole corrected"
@@ -764,6 +850,40 @@ def gate_why(reply):
   return "ok"
 
 
+async def guard(session, mode):
+  """Snapshots the workdir ("save") or undoes changes since then ("restore").
+
+  Skipped when the workdir is the container root. A guard that fails is
+  logged and never stops the run.
+
+  Args:
+    session: Active `taskbridge.Session` connected to the task container.
+    mode: "save" before the check roles run, "restore" after them (only
+      after a save that succeeded).
+
+  Returns:
+    Whether the command ran and exited 0.
+  """
+  root = session.workdir.rstrip("/")
+  if not root:
+    return False
+  try:
+    if mode == "save":
+      await session.write_file(GUARD_PATH, GUARD)
+    result = await session.exec(
+        f"python3 {GUARD_PATH} {shlex.quote(root)} {mode}"
+        f" {GUARD_FILE_MB} {GUARD_TOTAL_MB}",
+        timeout_sec=300,
+    )
+  except taskbridge.TaskError as exc:
+    await session.log(safe(f"check guard: {mode} failed ({str(exc)[:200]})"))
+    return False
+  out = (result["output"] or "").strip()
+  if out:
+    await session.log(safe(f"check guard: {out[:600]}"))
+  return result.get("exit_code") == 0
+
+
 async def gate_run(session, script):
   """Runs the gate check inside the task container and reads its verdict.
 
@@ -1091,49 +1211,58 @@ async def solve(session):
     if not time_for(until(CHECK_SHARE / 2)):
       break
     await session.log(f"phase: gate {round_num}")
-    if check_script is None and time_for(until(CHECK_SHARE / 4)):
-      gating = conversation(
-          GATE, session, f"## Task\n{task}\n\n## Plan\n{plan}"
-      )
-      reply = await agent(
-          session, gating, READ_ONLY + extra, until(CHECK_SHARE / 2)
-      )
-      check_script = gate_script(reply)
-      why = "" if check_script else gate_why(reply)
-      # one repair turn for a script that does not compile (EXP-028 #1: both
-      # gate scripts lost to one unterminated string each)
-      if "SyntaxError" in why and time_for(until(CHECK_SHARE / 4)):
-        await session.log(safe(f"gate: script does not compile ({why})"))
-        gating.append({"role": "user", "content": GATE_REPAIR.format(why=why)})
+    # the check roles may not change the deliverables: whatever they write
+    # under the workdir is undone before the verdict reaches the fix round
+    saved = await guard(session, "save")
+    try:
+      if check_script is None and time_for(until(CHECK_SHARE / 4)):
+        gating = conversation(
+            GATE, session, f"## Task\n{task}\n\n## Plan\n{plan}"
+        )
         reply = await agent(
             session, gating, READ_ONLY + extra, until(CHECK_SHARE / 2)
         )
         check_script = gate_script(reply)
         why = "" if check_script else gate_why(reply)
-      await session.log(
-          "gate: script ready" if check_script else
-          safe(f"gate: no usable script ({why})")
+        # one repair turn for a script that does not compile (EXP-028 #1:
+        # both gate scripts lost to one unterminated string each)
+        if "SyntaxError" in why and time_for(until(CHECK_SHARE / 4)):
+          await session.log(safe(f"gate: script does not compile ({why})"))
+          gating.append(
+              {"role": "user", "content": GATE_REPAIR.format(why=why)}
+          )
+          reply = await agent(
+              session, gating, READ_ONLY + extra, until(CHECK_SHARE / 2)
+          )
+          check_script = gate_script(reply)
+          why = "" if check_script else gate_why(reply)
+        await session.log(
+            "gate: script ready" if check_script else
+            safe(f"gate: no usable script ({why})")
+        )
+      verdict = (
+          await gate_run(session, check_script) if check_script else None
       )
-    verdict = (
-        await gate_run(session, check_script) if check_script else None
-    )
-    if verdict is None:
-      if check_script is not None:
-        # a check with no verdict lines, or broken tooling, is not rerun
-        check_script = None
-      if not time_for(until(CHECK_SHARE / 2)):
-        break
-      await session.log(f"phase: verify {round_num}")
-      review = (
-          f"## Task\n{task}\n\n## Plan\n{plan}\n\n## The engineer's"
-          f" summary\n{summary}"
-      )
-      verdict = await agent(
-          session,
-          conversation(VERIFIER, session, review),
-          READ_ONLY + extra,
-          until(CHECK_SHARE / 2),
-      )
+      if verdict is None:
+        if check_script is not None:
+          # a check with no verdict lines, or broken tooling, is not rerun
+          check_script = None
+        if not time_for(until(CHECK_SHARE / 2)):
+          break
+        await session.log(f"phase: verify {round_num}")
+        review = (
+            f"## Task\n{task}\n\n## Plan\n{plan}\n\n## The engineer's"
+            f" summary\n{summary}"
+        )
+        verdict = await agent(
+            session,
+            conversation(VERIFIER, session, review),
+            READ_ONLY + extra,
+            until(CHECK_SHARE / 2),
+        )
+    finally:
+      if saved:
+        await guard(session, "restore")
     await session.log(safe(f"verdict: {verdict[:1000]}"))
     # PASS alone in any letter case (Markdown emphasis and a full stop aside),
     # or an empty reply, names no gaps

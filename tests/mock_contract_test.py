@@ -289,6 +289,7 @@ class Evaluator:
     self.execs = []
     self.n_execs = 0
     self.n_gate = 0  # mechanical-check runs (own counter, see below)
+    self.guards = []  # check-guard commands (save / restore), not counted
 
   async def handle(self, ws):
     """Runs one full exchange on `ws` and returns the terminal frame."""
@@ -321,6 +322,20 @@ class Evaluator:
       if kind == "exec":
         cmd = message.get("command", "")
         self.execs.append(cmd)
+        if "ple_guard.py" in cmd:
+          # the check guard runs outside the fault-injection counters; a
+          # restore reports what $guard_out says the check had changed
+          self.guards.append(cmd.split()[3])
+          restore = cmd.split()[3] == "restore"
+          await ws.send(json.dumps({
+              "type": "result",
+              "id": message["id"],
+              "exit_code": 0,
+              "output": self.cfg.get("guard_out", "") if restore else "",
+              "truncated": False,
+              "timed_out": False,
+          }))
+          continue
         if "ple_gate.py" in cmd:
           # the mechanical check runs on its own counter, scripted from
           # gate_outs, so gate reruns never shift the fault injections
@@ -471,9 +486,95 @@ def check(ev, *, name, result_type="done", final_in=(), log_in=(),
   print(f"[PASS] {name}: {ev.result['type']} secs={ev.secs:.1f}")
 
 
+def guard_unit():
+  """Runs serve.py's GUARD script for real on a scratch tree.
+
+  The check writes a new file and a new folder, rewrites one deliverable
+  and deletes another; the restore must leave the tree exactly as it was
+  saved (contents and mtimes), and use its snapshot once. With a 0 MB cap
+  nothing is kept, so a rewritten file is reported, not restored.
+  """
+  import ast
+  import shutil
+  import subprocess
+  import tempfile
+
+  here = os.path.dirname(os.path.abspath(__file__))
+  tree = ast.parse(open(os.path.join(here, "..", "serve.py")).read())
+  guard = next(
+      ast.literal_eval(n.value) for n in tree.body
+      if isinstance(n, ast.Assign)
+      and getattr(n.targets[0], "id", "") == "GUARD"
+  )
+  tmp = tempfile.mkdtemp()
+  try:
+    script, snap = os.path.join(tmp, "g.py"), os.path.join(tmp, "snap")
+    root = os.path.join(tmp, "work")
+    os.makedirs(os.path.join(root, "output"))
+    os.makedirs(os.path.join(root, "project"))
+    for rel, data in (("output/submission.zip", b"PK-original"),
+                      ("output/notes.md", b"notes"),
+                      ("project/input.csv", b"a,b\n1,2\n")):
+      with open(os.path.join(root, rel), "wb") as f:
+        f.write(data)
+    open(script, "w").write(guard)
+    env = dict(os.environ, PLE_GUARD_SNAP=snap)
+
+    def state():
+      out = {}
+      for d, _, names in os.walk(root):
+        for name in names:
+          p = os.path.join(d, name)
+          out[os.path.relpath(p, root)] = (
+              open(p, "rb").read(), os.stat(p).st_mtime_ns)
+      dirs = sorted(os.path.relpath(d, root) for d, _, _ in os.walk(root))
+      return out, dirs
+
+    def run(mode, one="50", total="1000"):
+      return subprocess.run(
+          [sys.executable, script, root, mode, one, total], env=env,
+          capture_output=True, text=True, check=True).stdout
+
+    def meddle():
+      time.sleep(0.01)
+      with open(os.path.join(root, "output/submission.zip"), "ab") as f:
+        f.write(b"+duplicates")
+      os.remove(os.path.join(root, "output/notes.md"))
+      with open(os.path.join(root, "acceptance_check.py"), "w") as f:
+        f.write("print('PASS')")
+      os.makedirs(os.path.join(root, "scratch/deep"))
+      with open(os.path.join(root, "scratch/deep/x.txt"), "w") as f:
+        f.write("x")
+
+    before = state()
+    assert run("save") == "", "guard: save printed output"
+    assert run("restore") == "", "guard: an untouched tree reported changes"
+    assert run("save") == ""
+    meddle()
+    out = run("restore")
+    assert "removed 2 new file(s), restored 2 changed or deleted" in out, out
+    after = state()
+    off = sorted(k for k in set(before[0]) | set(after[0])
+                 if before[0].get(k) != after[0].get(k))
+    assert after == before, f"guard: differs at {off}, dirs {after[1]}"
+    assert not os.path.exists(snap + ".json"), "guard: snapshot kept"
+    assert run("restore") == "", "guard: a used snapshot was reused"
+    run("save", one="0", total="0")
+    meddle()
+    out = run("restore", one="0", total="0")
+    assert "could not restore 2 (too big)" in out, out
+    assert not os.path.exists(os.path.join(root, "acceptance_check.py"))
+    print("[PASS] guard_unit: restore matches the saved tree")
+  finally:
+    shutil.rmtree(tmp)
+
+
 async def main():
+  guard_unit()
+
   # clean: the scripted full loop completes with all phase markers
   ev, _ = await run_case("clean", {"MOCK_CASE": "clean"}, {})
+  assert ev.guards == ["save", "restore"], f"clean: guard calls {ev.guards}"
   check(ev, log_in=("phase: plan", "phase: work", "phase: gate 1",
                     "gate: script ready", "verdict: PASS"),
         log_not_in=("reply announces work",),
@@ -656,6 +757,20 @@ async def main():
                     "at line 2: \"print('PASS scripted-ok)\"",
                     "gate: script ready", "verdict: PASS"),
         name="gate_repair")
+
+  # check_guard: every check round (gate, its script, the reviewer) runs
+  # between a save and a restore of the workdir, and what the restore
+  # undid reaches the log before the fix round
+  ev, _ = await run_case(
+      "check_guard", {"MOCK_CASE": "fix_round"},
+      {"gate_outs": ["FAIL g1: out.txt needs a trailing newline",
+                     "PASS g1"],
+       "guard_out": "undid the check's writes under /app: removed 1 new"
+                    " file(s), restored 1 changed or deleted"},
+  )
+  assert ev.guards == ["save", "restore"] * 2, f"check_guard: {ev.guards}"
+  check(ev, log_in=("check guard: undid the check's writes under /app",
+                    "phase: fix 1"), name="check_guard")
 
   # gate_fence: a gate script holding "```" inside a string is taken whole
   # (the closing fence is a line of its own), compiles and runs
