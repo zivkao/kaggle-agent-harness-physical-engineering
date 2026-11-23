@@ -149,6 +149,18 @@ UNFINISHED = (
     "You described work that is still to do instead of doing it. Do it now"
     " with your tools, and reply without a tool call only once it is done."
 )
+# files the task names by absolute path are checked with `test -s`, not by a
+# model (EXP-029 fire-solve-convergence: the worker answered that it had saved
+# the .docx the task named without making one tool call, the gate's script
+# printed 14 PASS lines anyway, and the task scored 0 as not delivered)
+NAMED_FILE = re.compile(
+    r"(?<![\w.:/])/(?:[\w.\-]+/)*[\w.\-]+\.[A-Za-z][A-Za-z0-9]{0,4}\b"
+)
+MAX_NAMED = 20
+MISSING = (
+    "These files the task asks for do not exist yet or are empty:\n{files}\n\n"
+    "Write them now with your tools, then reply with your updated summary."
+)
 # Claude caches a prompt prefix only when marked with cache_control. Each call
 # marks the system prompt and the latest message (using 2 of Claude's 4 cache
 # breakpoints) so each turn reads the prior conversation from cache. Other
@@ -896,6 +908,48 @@ async def guard(session, mode):
   return result.get("exit_code") == 0
 
 
+def named_files(task):
+  """Returns the absolute file paths `task` names, in order, without repeats.
+
+  Args:
+    task: The task instruction.
+
+  Returns:
+    Up to `MAX_NAMED` paths such as `/filesystem/out/report.docx`.
+  """
+  return list(dict.fromkeys(NAMED_FILE.findall(task)))[:MAX_NAMED]
+
+
+async def missing_files(session, paths):
+  """Lists which of `paths` do not exist or are empty in the task container.
+
+  A check that cannot run is logged and reports nothing missing, so it never
+  stops the run.
+
+  Args:
+    session: Active `taskbridge.Session` connected to the task container.
+    paths: Absolute paths from `named_files`.
+
+  Returns:
+    The missing or empty paths.
+  """
+  if not paths:
+    return []
+  quoted = " ".join(shlex.quote(p) for p in paths)
+  try:
+    result = await session.exec(
+        f': ple_deliverables; for p in {quoted}; do [ -s "$p" ] ||'
+        ' printf "%s\\n" "$p"; done'
+    )
+  except taskbridge.TaskError as exc:
+    await session.log(
+        safe(f"deliverables: check failed ({str(exc)[:200]})")
+    )
+    return []
+  shown = set((result["output"] or "").splitlines())
+  return [p for p in paths if p in shown]
+
+
 async def gate_run(session, script):
   """Runs the gate check inside the task container and reads its verdict.
 
@@ -1221,6 +1275,26 @@ async def solve(session):
   summary = await agent(
       session, work, TOOLS + extra, until(CHECK_SHARE), final=True
   )
+  named = named_files(task)
+  missing = await missing_files(session, named)
+  if named:
+    gone = f"; missing {', '.join(missing)}" if missing else ""
+    await session.log(safe(
+        f"deliverables: {len(named) - len(missing)} of {len(named)} named"
+        f" file(s) present{gone}"
+    ))
+  # one push for files the worker says it wrote but did not
+  if missing and time_for(until(CHECK_SHARE / 2)):
+    await session.log("deliverables: asking the worker to write them")
+    work.append(
+        {"role": "user", "content": MISSING.format(files="\n".join(missing))}
+    )
+    summary = (
+        await agent(
+            session, work, TOOLS + extra, until(CHECK_SHARE / 2), final=True
+        )
+        or summary
+    )
   # P3: the acceptance check is mechanical. It is written once by the gate
   # role and rerun every round; only when no usable check exists does the
   # read-only verifier check by hand for that round.
@@ -1307,6 +1381,16 @@ async def solve(session):
     finally:
       if saved:
         await guard(session, "restore")
+    # a named file that is missing fails the round whatever the check said
+    missing = await missing_files(session, named)
+    if missing:
+      gaps = "\n".join(
+          f"FAIL DELIVERABLE: {p} does not exist or is empty" for p in missing
+      )
+      verdict = (
+          gaps if verdict.strip("*_. \r\n\t").upper() in ("", "PASS")
+          else f"{gaps}\n{verdict}"
+      )
     await session.log(safe(f"verdict: {verdict[:1000]}"))
     # PASS alone in any letter case (Markdown emphasis and a full stop aside),
     # or an empty reply, names no gaps

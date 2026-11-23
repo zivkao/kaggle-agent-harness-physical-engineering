@@ -121,6 +121,13 @@ class MockModel(BaseHTTPRequestHandler):
                   "Parsed the inputs.\n\n**Next Steps:**\n* write out.txt"}
         if "still to do instead" in last:
           MockModel.flags["pushes"] = MockModel.flags.get("pushes", 0) + 1
+      if "do not exist yet" in last:
+        MockModel.flags["saw_missing"] = True
+      if case == "claimed_done":  # EXP-029 fire-solve: says done, wrote none
+        if call == 1:
+          return {"role": "assistant",
+                  "content": "summary: saved /app/out.txt as asked"}
+        call -= 1  # then as clean, once asked for the file
       if case == "args_cut" and call == 1:  # a long file through a call
         return self.tool(
             "write_file", {"path": "/app/out.txt", "content": "x" * 30000}
@@ -292,6 +299,7 @@ class Evaluator:
     self.n_execs = 0
     self.n_gate = 0  # mechanical-check runs (own counter, see below)
     self.guards = []  # check-guard commands (save / restore), not counted
+    self.named = []  # named-file checks and what each reported missing
 
   async def handle(self, ws):
     """Runs one full exchange on `ws` and returns the terminal frame."""
@@ -334,6 +342,21 @@ class Evaluator:
               "id": message["id"],
               "exit_code": 0,
               "output": self.cfg.get("guard_out", "") if restore else "",
+              "truncated": False,
+              "timed_out": False,
+          }))
+          continue
+        if "ple_deliverables" in cmd:
+          # the named-file check runs outside the fault-injection counters;
+          # $missing_outs scripts which paths it reports missing per call
+          outs = self.cfg.get("missing_outs") or [""]
+          out = outs[min(len(self.named), len(outs) - 1)]
+          self.named.append(out)
+          await ws.send(json.dumps({
+              "type": "result",
+              "id": message["id"],
+              "exit_code": 0,
+              "output": out,
               "truncated": False,
               "timed_out": False,
           }))
@@ -577,10 +600,39 @@ async def main():
   # clean: the scripted full loop completes with all phase markers
   ev, _ = await run_case("clean", {"MOCK_CASE": "clean"}, {})
   assert ev.guards == ["save", "restore"], f"clean: guard calls {ev.guards}"
+  assert ev.named == ["", ""], f"clean: named-file checks {ev.named}"
   check(ev, log_in=("phase: plan", "phase: work", "phase: gate 1",
-                    "gate: script ready", "verdict: PASS"),
-        log_not_in=("reply announces work",),
+                    "gate: script ready", "verdict: PASS",
+                    "deliverables: 1 of 1 named file(s) present"),
+        log_not_in=("reply announces work", "asking the worker to write"),
         final_in=("summary: /app/out.txt",), name="clean")
+
+  # claimed_done: the worker says it saved the named file without a tool
+  # call (EXP-029 fire-solve-convergence); the harness finds it missing and
+  # sends the worker back once, before the gate
+  ev, _ = await run_case(
+      "claimed_done", {"MOCK_CASE": "claimed_done"},
+      {"missing_outs": ["/app/out.txt\n", ""]},
+  )
+  assert MockModel.flags.get("saw_missing"), "claimed_done: no push"
+  assert len(ev.named) == 2, f"claimed_done: checks {ev.named}"
+  check(ev, log_in=("deliverables: 0 of 1 named file(s) present; missing"
+                    " /app/out.txt", "deliverables: asking the worker",
+                    "verdict: PASS"),
+        log_not_in=("FAIL DELIVERABLE",),
+        final_in=("summary: /app/out.txt written",), name="claimed_done")
+
+  # deliverable_gate: the gate's script passes but the named file is gone;
+  # the round fails on it and the fix round runs, then the rerun passes
+  ev, _ = await run_case(
+      "deliverable_gate", {"MOCK_CASE": "clean"},
+      {"missing_outs": ["", "/app/out.txt\n", ""]},
+  )
+  assert MockModel.flags.get("saw_gap"), "deliverable_gate: no fix round"
+  check(ev, log_in=("verdict: FAIL DELIVERABLE: /app/out.txt does not exist",
+                    "phase: fix 1", "phase: gate 2", "verdict: PASS"),
+        log_not_in=("asking the worker to write",),
+        name="deliverable_gate")
 
   # fix_round: the scripted mechanical check lists a gap once and the
   # worker is sent back to write; the rerun of the same check passes
