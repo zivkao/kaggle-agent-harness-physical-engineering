@@ -691,6 +691,30 @@ def unfinished(text, final):
   return final and bool(NEXT_STEPS.search(text))
 
 
+# a fenced code block; the closing fence is a line of its own, so a script
+# that checks Markdown for "```" is not cut at that string (EXP-028 #2: four
+# gate scripts lost to `startswith('```json')` and the like)
+GATE_FENCE = re.compile(
+    r"```(?:[Pp]ython\d*)?[^\S\n]*\n(.*?)^[^\S\n]*```[^\S\n]*$", re.S | re.M
+)
+
+
+def gate_body(reply):
+  """Returns the gate reply's script source and where it came from.
+
+  Args:
+    reply: The gate agent's final text.
+
+  Returns:
+    `(body, where)`: the first fenced code block, or the whole reply when
+    it has none, stripped; `where` says which, for the log.
+  """
+  found = GATE_FENCE.search(reply)
+  if found:
+    return found.group(1).strip(), "code block"
+  return reply.strip(), "no code block, whole reply"
+
+
 def gate_script(reply):
   """Extracts the gate agent's Python acceptance check from its reply.
 
@@ -704,8 +728,7 @@ def gate_script(reply):
   Returns:
     The script source, or None when no usable script was produced.
   """
-  found = re.search(r"```(?:[Pp]ython\d*)?[^\S\n]*\n(.*?)```", reply, re.S)
-  body = (found.group(1) if found else reply).strip()
+  body, _ = gate_body(reply)
   if not body or len(body) > GATE_SCRIPT_CHARS:
     return None
   try:
@@ -724,9 +747,7 @@ def gate_why(reply):
   Returns:
     A short reason: an empty reply, its size, or the syntax error.
   """
-  found = re.search(r"```(?:[Pp]ython\d*)?[^\S\n]*\n(.*?)```", reply, re.S)
-  body = (found.group(1) if found else reply).strip()
-  where = "code block" if found else "no code block, whole reply"
+  body, where = gate_body(reply)
   if not body:
     return "empty reply"
   if len(body) > GATE_SCRIPT_CHARS:

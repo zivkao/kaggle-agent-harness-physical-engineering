@@ -137,6 +137,13 @@ class MockModel(BaseHTTPRequestHandler):
     if role == "gate":
       if case == "gate_fallback":  # prose instead of a script
         return {"role": "assistant", "content": "I could not write a script"}
+      if case == "gate_fence":  # the script itself checks for a fence
+        return {
+            "role": "assistant",
+            "content": "Here is the check.\n```python\n"
+                       "fence = '```json'\nprint('PASS fence-ok', len(fence))"
+                       "\n```\n",
+        }
       if case == "gate_repair" and "does not compile" not in last:
         return {  # an unterminated string, as EXP-028 #1's gate wrote
             "role": "assistant",
@@ -649,6 +656,12 @@ async def main():
                     "at line 2: \"print('PASS scripted-ok)\"",
                     "gate: script ready", "verdict: PASS"),
         name="gate_repair")
+
+  # gate_fence: a gate script holding "```" inside a string is taken whole
+  # (the closing fence is a line of its own), compiles and runs
+  ev, _ = await run_case("gate_fence", {"MOCK_CASE": "gate_fence"}, {})
+  check(ev, log_in=("gate: script ready", "verdict: PASS"),
+        log_not_in=("does not compile",), name="gate_fence")
 
   # unfinished: a planner reply of one sentence of intent and a worker
   # summary listing "Next steps" are each sent back once to do the work;
