@@ -710,6 +710,30 @@ def gate_script(reply):
   return body
 
 
+def gate_why(reply):
+  """Says why `gate_script` found no usable script in `reply` (for the log).
+
+  Args:
+    reply: The gate agent's final text.
+
+  Returns:
+    A short reason: an empty reply, its size, or the syntax error.
+  """
+  found = re.search(r"```(?:[Pp]ython\d*)?[^\S\n]*\n(.*?)```", reply, re.S)
+  body = (found.group(1) if found else reply).strip()
+  where = "code block" if found else "no code block, whole reply"
+  if not body:
+    return "empty reply"
+  if len(body) > GATE_SCRIPT_CHARS:
+    return f"{where}: {len(body)} chars, over {GATE_SCRIPT_CHARS}"
+  try:
+    compile(body, "ple_gate", "exec")
+  except (SyntaxError, ValueError) as exc:
+    error = f"{type(exc).__name__} {str(exc)[:120]}"
+    return f"{where}: {error}; starts {body[:80]!r}"
+  return "ok"
+
+
 async def gate_run(session, script):
   """Runs the gate check inside the task container and reads its verdict.
 
@@ -1038,14 +1062,16 @@ async def solve(session):
       break
     await session.log(f"phase: gate {round_num}")
     if check_script is None and time_for(until(CHECK_SHARE / 4)):
-      check_script = gate_script(await agent(
+      reply = await agent(
           session,
           conversation(GATE, session, f"## Task\n{task}\n\n## Plan\n{plan}"),
           READ_ONLY + extra,
           until(CHECK_SHARE / 2),
-      ))
+      )
+      check_script = gate_script(reply)
       await session.log(
-          "gate: script ready" if check_script else "gate: no usable script"
+          "gate: script ready" if check_script else
+          safe(f"gate: no usable script ({gate_why(reply)})")
       )
     verdict = (
         await gate_run(session, check_script) if check_script else None

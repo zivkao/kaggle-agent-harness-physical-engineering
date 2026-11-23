@@ -483,7 +483,8 @@ async def main():
   # gate_fallback: the gate answers prose; the read-only reviewer takes
   # the round instead and passes
   ev, _ = await run_case("gate_fallback", {"MOCK_CASE": "gate_fallback"}, {})
-  check(ev, log_in=("gate: no usable script", "phase: verify 1"),
+  check(ev, log_in=("gate: no usable script (no code block, whole reply:"
+                    " SyntaxError", "phase: verify 1"),
         final_in=("summary: /app/out.txt",), name="gate_fallback")
 
   # gate_exec: the check runs but prints no verdict lines; the reviewer
