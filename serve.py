@@ -111,6 +111,13 @@ MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "32000"))
 # it: a reasoning model can spend a whole reply budget thinking (EXP-024: one
 # 32K-token reply, all reasoning, half of a 64K window)
 OUT_SHARE = 4
+# with a known window, old tool results are cut before a call until a reply
+# has at least this share of the window, doubled for the rest of a step once
+# a reply ran out while still reasoning (EXP-031: once the window was learned,
+# fix-round prompts of ~54.8K tokens left 2.7-3.6K for a reply in a 64K
+# window; Gemma reasoned through each budget and 9 replies came back empty,
+# while results were cut only below CTX_MIN_ANSWER)
+ANSWER_SHARE = 8
 # a "length" reply this many tokens or more short of its budget was stopped by
 # the window (EXP-026: three 200 replies stopped at 65,535 tokens, asked 32K)
 CUT_SLACK = 16
@@ -1143,6 +1150,7 @@ async def agent(session, messages, tools, until, final=False):
   # head: the start of an answer cut off at the output limit
   nudges, head, waits = 0, "", iter(RETRY_WAITS)
   pushes = 0  # replies sent back for announcing work instead of doing it
+  boost = 1  # 2 once a reply ran out of budget while reasoning
   while True:
     left = session.time_left()  # None when the task has no time limit
     wrap_up = left is not None and left < until
@@ -1171,14 +1179,21 @@ async def agent(session, messages, tools, until, final=False):
     if CONTEXT_TOKENS:
       margin = CTX_MARGIN or max(8000, CONTEXT_TOKENS // 12)
       room = CONTEXT_TOKENS - margin - ctx_used(messages)
+      want = max(CTX_MIN_ANSWER, CONTEXT_TOKENS * boost // ANSWER_SHARE)
       if room < 0:
         await session.log(
             f"context budget: over by {-room} tokens;"
             " shortening old tool results"
         )
-      while room < CTX_MIN_ANSWER:
+      elif room < want:
+        await session.log(
+            f"context budget: {room} tokens left for the reply, under"
+            f" {want}; shortening old tool results"
+        )
+      while room < want:
         if not await shorten(session, messages, tag="context budget"):
-          room = CTX_MIN_ANSWER  # bare conversation alone does not fit
+          # bare conversation alone does not fit
+          room = max(room, CTX_MIN_ANSWER)
           break
         room = CONTEXT_TOKENS - margin - ctx_used(messages)
       max_out = max(
@@ -1253,6 +1268,8 @@ async def agent(session, messages, tools, until, final=False):
       if wrap_up or (message.content and not cut) or nudges == MAX_NUDGES:
         return text
       nudges, head = nudges + 1, text
+      if cut:  # the budget ran out: leave more room from now on
+        boost = 2
       if message.tool_calls:  # cut off inside a call
         await session.log(
             "reply cut off inside a tool call; call not run, asking for"

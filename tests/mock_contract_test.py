@@ -875,6 +875,21 @@ async def main():
   check(ev, log_in=("reply cut off before any answer",),
         final_in=("summary: /app/out.txt",), name="empty_cut")
 
+  # answer_room: a long tool result leaves the planner's next reply a
+  # little over CTX_MIN_ANSWER; that reply runs out while reasoning, so the
+  # following call cuts old results until a quarter of the window is free
+  # (EXP-031: nine empty replies at 2.7-3.6K tokens of room in 64K)
+  ev, _ = await run_case(
+      "answer_room",
+      {"MOCK_CASE": "empty_cut", "CONTEXT_TOKENS": "6800",
+       "CTX_MARGIN_TOKENS": "100", "MAX_OUTPUT_TOKENS": "4000"},
+      {"exec_output_chars": 30000},
+  )
+  check(ev, log_in=("reply cut off before any answer",
+                    "tokens left for the reply, under 1700",
+                    "context budget: cut"),
+        final_in=("summary: /app/out.txt",), name="answer_room")
+
   # call_cut: a reply cut at the output limit inside a tool call is not
   # run (its arguments are cut); the model is asked for smaller calls
   ev, _ = await run_case("call_cut", {"MOCK_CASE": "call_cut"}, {})
