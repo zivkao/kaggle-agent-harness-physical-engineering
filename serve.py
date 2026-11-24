@@ -98,6 +98,18 @@ CTX_MARGIN = int(os.environ.get("CTX_MARGIN_TOKENS", "0"))
 # in one phase and low in another, enough to pin the reply budget at its
 # floor for 20 calls while the window still had room
 CTX_RATIO = None
+# per conversation (keyed by the list's id): (real prompt tokens, est_tokens)
+# of its last call. A conversation's size is that real count plus what
+# changed since, scaled by its own ratio; CTX_RATIO only sizes a
+# conversation's first call. EXP-032: the ratio from the gate's fresh
+# conversation sized the ~31K-token work conversation at ~92K, so fix 1 cut
+# 9 old results it still needed
+CTX_SEEN = {}
+# the message fields an endpoint reads back. est_tokens counts only these:
+# a reply's stored reasoning (`reasoning_content`, provider fields) is not
+# sent back by Ollama, yet in EXP-032 it made chars/4 of the work
+# conversation ~3.7x its real prompt tokens (replies reasoned up to 16K)
+SENT_KEYS = ("role", "content", "tool_calls", "tool_call_id", "name")
 CTX_PROBED = False  # window_probe runs once per serve process
 # never shrink the reply budget below this, even if the conversation alone
 # no longer fits: let the reactive path handle it
@@ -681,14 +693,18 @@ def est_tokens(messages):
   Returns:
     The estimated prompt token count.
   """
-  return len(json.dumps(messages, ensure_ascii=False)) // 4
+  sent = [{k: m[k] for k in SENT_KEYS if k in m} for m in messages]
+  return len(json.dumps(sent, ensure_ascii=False)) // 4
 
 
 def ctx_used(messages):
   """Estimates the real prompt tokens of `messages`: chars/4, calibrated.
 
-  Scales `est_tokens` by `CTX_RATIO`, the real-to-estimate ratio the last
-  reply's `usage.prompt_tokens` showed (it also absorbs the tool
+  After a call of this conversation: the real prompt tokens that call
+  reported (`CTX_SEEN`) plus chars/4 of what was added or cut since, scaled
+  by that call's real-to-estimate ratio. On its
+  first call: `est_tokens` scaled by `CTX_RATIO`, the real-to-estimate
+  ratio of the last reply in any conversation (it also absorbs the tool
   definitions, which est_tokens does not see). Before any reply, chars/4.
 
   Args:
@@ -698,6 +714,10 @@ def ctx_used(messages):
     The estimated prompt token count in the endpoint's own tokens.
   """
   est = est_tokens(messages)
+  last = CTX_SEEN.get(id(messages))
+  if last:
+    seen, sent = last
+    return max(0, int(seen + (est - sent) * seen / sent))
   return int(est * CTX_RATIO) if CTX_RATIO else est
 
 
@@ -1240,6 +1260,7 @@ async def agent(session, messages, tools, until, final=False):
     made = reply.usage.completion_tokens if reply.usage else None
     if seen and sent:
       CTX_RATIO = seen / sent
+      CTX_SEEN[id(messages)] = (seen, sent)
     if cut and seen and made is not None and made + CUT_SLACK < max_out:
       await learn_window(session, seen + made, "a reply cut at the window")
     text = head + (message.content or "")
@@ -1318,6 +1339,7 @@ async def solve(session):
     The final summary message from the worker.
   """
   total = session.time_left()
+  CTX_SEEN.clear()  # list ids of an earlier task's conversations may recur
 
   def until(share):
     """Computes the remaining seconds when `share` of total task time is left.

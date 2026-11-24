@@ -123,6 +123,10 @@ class MockModel(BaseHTTPRequestHandler):
           MockModel.flags["pushes"] = MockModel.flags.get("pushes", 0) + 1
       if "missing, empty or do not open" in last:
         MockModel.flags["saw_missing"] = True
+      if case == "ratio_carry":  # a long read first, then as clean
+        if call == 1:
+          return self.tool("bash", {"command": "cat big_input.txt"})
+        call -= 1
       if case == "claimed_done":  # EXP-029 fire-solve: says done, wrote none
         if call == 1:
           return {"role": "assistant",
@@ -233,8 +237,10 @@ class MockModel(BaseHTTPRequestHandler):
     limit = int(os.environ.get("MOCK_CTX_LIMIT", "0"))
     # $MOCK_TOKEN_RATIO: real tokens per chars/4 unit (default 1), which
     # usage.prompt_tokens reports and the window limits below are counted in
-    size = int(len(json.dumps(request.get("messages") or [],
-                              ensure_ascii=False)) // 4
+    # stored reasoning sent back is not part of the prompt, as with Ollama
+    shown = [{k: v for k, v in m.items() if k != "reasoning_content"}
+             for m in request.get("messages") or []]
+    size = int(len(json.dumps(shown, ensure_ascii=False)) // 4
                * float(os.environ.get("MOCK_TOKEN_RATIO", "1")))
     if limit and size > limit:
       MockModel.flags["overflows"] = MockModel.flags.get("overflows", 0) + 1
@@ -255,6 +261,10 @@ class MockModel(BaseHTTPRequestHandler):
     asked = request.get("max_completion_tokens") or 0
     MockModel.flags["max_out"] = max(MockModel.flags.get("max_out", 0), asked)
     message = self.reply(request)
+    # $MOCK_REASONING: characters of reasoning each reply carries
+    thought = int(os.environ.get("MOCK_REASONING", "0"))
+    if thought:
+      message["reasoning_content"] = "r" * thought
     finish = message.pop("_finish", "stop")
     # a reply stopped at its budget used all of it
     made = asked if finish == "length" else 100
@@ -447,7 +457,7 @@ async def run_case(name, env_add, cfg, api_key="mock-test-key"):
   for key in (
       "MOCK_CASE", "MOCK_FAIL_FROM", "MOCK_FAIL_TO", "MOCK_FAIL_STATUS",
       "MOCK_FAIL_BODY", "MOCK_DELAY", "MOCK_WINDOW", "MOCK_CTX_LIMIT",
-      "MOCK_CTX_TRUNC", "MOCK_TOKEN_RATIO",
+      "MOCK_CTX_TRUNC", "MOCK_TOKEN_RATIO", "MOCK_REASONING",
   ):
     if key in env_add:
       os.environ[key] = str(env_add[key])
@@ -889,6 +899,22 @@ async def main():
                     "tokens left for the reply, under 1700",
                     "context budget: cut"),
         final_in=("summary: /app/out.txt",), name="answer_room")
+
+  # ratio_carry: every reply carries 16,000 characters of reasoning that the
+  # endpoint does not read back. Sized by what is sent, and each
+  # conversation by its own last real prompt, the work conversation still
+  # fits at fix 1 after the gate's fresh one (EXP-032: counted, it looked
+  # ~3.7x its real size there and fix 1 cut 9 results)
+  ev, _ = await run_case(
+      "ratio_carry",
+      {"MOCK_CASE": "ratio_carry", "CONTEXT_TOKENS": "14000",
+       "CTX_MARGIN_TOKENS": "100", "MAX_OUTPUT_TOKENS": "4000",
+       "MOCK_REASONING": "16000"},
+      {"exec_output_chars": 30000,
+       "gate_outs": ["FAIL g1: out.txt needs a newline", "PASS scripted-ok"]},
+  )
+  check(ev, log_in=("phase: fix 1", "phase: gate 2", "verdict: PASS"),
+        log_not_in=("context budget", "context full"), name="ratio_carry")
 
   # call_cut: a reply cut at the output limit inside a tool call is not
   # run (its arguments are cut); the model is asked for smaller calls
