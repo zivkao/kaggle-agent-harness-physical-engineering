@@ -121,7 +121,7 @@ class MockModel(BaseHTTPRequestHandler):
                   "Parsed the inputs.\n\n**Next Steps:**\n* write out.txt"}
         if "still to do instead" in last:
           MockModel.flags["pushes"] = MockModel.flags.get("pushes", 0) + 1
-      if "do not exist yet" in last:
+      if "missing, empty or do not open" in last:
         MockModel.flags["saw_missing"] = True
       if case == "claimed_done":  # EXP-029 fire-solve: says done, wrote none
         if call == 1:
@@ -597,8 +597,80 @@ def guard_unit():
     shutil.rmtree(tmp)
 
 
+def files_unit():
+  """Runs serve.py's FILES_CHECK script for real on scratch deliverables.
+
+  Covers the EXP-029/030 fire-solve cases (no file; text saved as .docx; a
+  hand-built package with a broken [Content_Types].xml) next to good files,
+  which must print nothing. The broken package is only caught by opening it
+  with python-docx, so that case runs where python-docx imports.
+  """
+  import ast
+  import importlib.util
+  import shutil
+  import subprocess
+  import tempfile
+  import zipfile
+
+  here = os.path.dirname(os.path.abspath(__file__))
+  tree = ast.parse(open(os.path.join(here, "..", "serve.py")).read())
+  check = next(
+      ast.literal_eval(n.value) for n in tree.body
+      if isinstance(n, ast.Assign)
+      and getattr(n.targets[0], "id", "") == "FILES_CHECK"
+  )
+  has_docx = importlib.util.find_spec("docx") is not None
+  tmp = tempfile.mkdtemp()
+  try:
+    p = lambda name: os.path.join(tmp, name)  # noqa: E731
+    open(p("empty.pdf"), "wb").close()
+    open(p("text.docx"), "w").write("Disposition, plain text")
+    open(p("fake.pdf"), "w").write("not a pdf")
+    open(p("good.pdf"), "wb").write(b"%PDF-1.7\n%%EOF\n")
+    with zipfile.ZipFile(p("good.zip"), "w") as z:
+      z.writestr("a.csv", "x,y\n")
+    with zipfile.ZipFile(p("noparts.docx"), "w") as z:
+      z.writestr("readme.txt", "hi")
+    with zipfile.ZipFile(p("broken.docx"), "w") as z:  # as EXP-030 #1 built
+      z.writestr("[Content_Types].xml",
+                 '<?xml version="1.0"?><Types xmlns="http://schemas.'
+                 'openxmlformats.org/package/2006/content-types"><Override'
+                 ' PartName="/word/document.xml" DataType="x"/></Types>')
+      z.writestr("_rels/.rels", "<Relationships/>")
+      z.writestr("word/document.xml", "<w:document/>")
+    names = ["none.docx", "empty.pdf", "text.docx", "fake.pdf", "good.pdf",
+             "good.zip", "noparts.docx", "broken.docx"]
+    if has_docx:
+      import docx
+      d = docx.Document()
+      d.add_paragraph("ok")
+      d.save(p("good.docx"))
+      names.append("good.docx")
+    script = p("check.py")
+    open(script, "w").write(check)
+    out = subprocess.run(
+        [sys.executable, script] + [p(n) for n in names],
+        capture_output=True, text=True, check=True).stdout
+    got = dict(line.split("\t", 1) for line in out.splitlines())
+    got = {os.path.basename(k): v for k, v in got.items()}
+    want = {"none.docx": "does not exist", "empty.pdf": "is empty",
+            "text.docx": "not a zip archive", "fake.pdf": "no %PDF header",
+            "noparts.docx": "no word/document.xml"}
+    if has_docx:
+      want["broken.docx"] = "does not open as .docx"
+    for name, needle in want.items():
+      assert needle in got.get(name, ""), f"files: {name} -> {got.get(name)!r}"
+    extra = set(got) - set(want) - ({"broken.docx"} if not has_docx else set())
+    assert not extra, f"files: good files flagged {sorted(extra)}: {got}"
+    print(f"[PASS] files_unit: {len(want)} faults found, good files pass"
+          f"{'' if has_docx else ' (no python-docx: broken.docx not opened)'}")
+  finally:
+    shutil.rmtree(tmp)
+
+
 async def main():
   guard_unit()
+  files_unit()
 
   # clean: the scripted full loop completes with all phase markers
   ev, _ = await run_case("clean", {"MOCK_CASE": "clean"}, {})
@@ -607,7 +679,7 @@ async def main():
   assert MockModel.flags.get("gate_paths"), "clean: gate not given the paths"
   check(ev, log_in=("phase: plan", "phase: work", "phase: gate 1",
                     "gate: script ready", "verdict: PASS",
-                    "deliverables: 1 of 1 named file(s) present"),
+                    "deliverables: 1 of 1 named file(s) in order"),
         log_not_in=("reply announces work", "asking the worker to write"),
         final_in=("summary: /app/out.txt",), name="clean")
 
@@ -616,13 +688,13 @@ async def main():
   # sends the worker back once, before the gate
   ev, _ = await run_case(
       "claimed_done", {"MOCK_CASE": "claimed_done"},
-      {"missing_outs": ["/app/out.txt\n", ""]},
+      {"missing_outs": ["/app/out.txt\tdoes not exist\n", ""]},
   )
   assert MockModel.flags.get("saw_missing"), "claimed_done: no push"
   assert len(ev.named) == 2, f"claimed_done: checks {ev.named}"
-  check(ev, log_in=("deliverables: 0 of 1 named file(s) present; missing"
-                    " /app/out.txt", "deliverables: asking the worker",
-                    "verdict: PASS"),
+  check(ev, log_in=("deliverables: 0 of 1 named file(s) in order; at fault:"
+                    "\n- /app/out.txt does not exist",
+                    "deliverables: asking the worker", "verdict: PASS"),
         log_not_in=("FAIL DELIVERABLE",),
         final_in=("summary: /app/out.txt written",), name="claimed_done")
 
@@ -630,10 +702,10 @@ async def main():
   # the round fails on it and the fix round runs, then the rerun passes
   ev, _ = await run_case(
       "deliverable_gate", {"MOCK_CASE": "clean"},
-      {"missing_outs": ["", "/app/out.txt\n", ""]},
+      {"missing_outs": ["", "/app/out.txt\tdoes not open as .txt (x)\n", ""]},
   )
   assert MockModel.flags.get("saw_gap"), "deliverable_gate: no fix round"
-  check(ev, log_in=("verdict: FAIL DELIVERABLE: /app/out.txt does not exist",
+  check(ev, log_in=("verdict: FAIL DELIVERABLE: /app/out.txt does not open",
                     "phase: fix 1", "phase: gate 2", "verdict: PASS"),
         log_not_in=("asking the worker to write",),
         name="deliverable_gate")

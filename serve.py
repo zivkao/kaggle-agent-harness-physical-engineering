@@ -149,18 +149,76 @@ UNFINISHED = (
     "You described work that is still to do instead of doing it. Do it now"
     " with your tools, and reply without a tool call only once it is done."
 )
-# files the task names by absolute path are checked with `test -s`, not by a
+# files the task names by absolute path are checked by FILES_CHECK, not by a
 # model (EXP-029 fire-solve-convergence: the worker answered that it had saved
 # the .docx the task named without making one tool call, the gate's script
-# printed 14 PASS lines anyway, and the task scored 0 as not delivered)
+# printed 14 PASS lines anyway, and the task scored 0 as not delivered; in
+# EXP-030 #1 it saved text under .docx, then a hand-built package the grader's
+# renderer could not open, and scored 0 as not delivered again)
 NAMED_FILE = re.compile(
     r"(?<![\w.:/])/(?:[\w.\-]+/)*[\w.\-]+\.[A-Za-z][A-Za-z0-9]{0,4}\b"
 )
 MAX_NAMED = 20
 MISSING = (
-    "These files the task asks for do not exist yet or are empty:\n{files}\n\n"
-    "Write them now with your tools, then reply with your updated summary."
+    "These files the task asks for are missing, empty or do not open as their"
+    " type:\n{files}\n\nWrite them now with your tools, then reply with your"
+    " updated summary."
 )
+FILES_PATH = "/tmp/ple_deliverables.py"
+# prints `<path>\t<what is wrong>` for each argument that does not exist, is
+# empty, or does not open as its extension says; opens Office files with
+# their library when the container has it, else checks the package parts
+FILES_CHECK = r'''
+import os, sys, zipfile
+PART = {".docx": "word/document.xml", ".docm": "word/document.xml",
+        ".xlsx": "xl/workbook.xml", ".xlsm": "xl/workbook.xml",
+        ".pptx": "ppt/presentation.xml"}
+def opened(path, ext):
+    if ext in (".docx", ".docm"):
+        import docx
+        docx.Document(path)
+    elif ext in (".xlsx", ".xlsm"):
+        import openpyxl
+        openpyxl.load_workbook(path, read_only=True).close()
+    elif ext == ".pptx":
+        import pptx
+        pptx.Presentation(path)
+def why(path):
+    if not os.path.isfile(path):
+        return "does not exist"
+    if os.path.getsize(path) == 0:
+        return "is empty"
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext in PART or ext == ".zip":
+            with zipfile.ZipFile(path) as z:
+                bad = z.testzip()
+                names = set(z.namelist())
+            if bad:
+                return "has a corrupt archive entry: " + bad
+            if ext in PART:
+                part = PART[ext]
+                if part not in names or "[Content_Types].xml" not in names:
+                    return "is not a valid %s package (no %s)" % (ext, part)
+                try:
+                    opened(path, ext)
+                except ImportError:
+                    pass
+        elif ext == ".pdf":
+            with open(path, "rb") as f:
+                if not f.read(5).startswith(b"%PDF"):
+                    return "is not a PDF (no %PDF header)"
+    except zipfile.BadZipFile:
+        return "is not a %s file (not a zip archive)" % ext
+    except Exception as exc:
+        return "does not open as %s (%s: %s)" % (
+            ext, type(exc).__name__, str(exc)[:150])
+    return ""
+for path in sys.argv[1:]:
+    wrong = why(path)
+    if wrong:
+        print(path + "\t" + wrong.replace("\n", " "))
+'''
 # Claude caches a prompt prefix only when marked with cache_control. Each call
 # marks the system prompt and the latest message (using 2 of Claude's 4 cache
 # breakpoints) so each turn reads the prior conversation from cache. Other
@@ -331,7 +389,10 @@ item a change belongs to, which quantity convention applies) and for every duty,
 source states that the deliverable must reflect, append one tab-separated line to `/tmp/ple_assumptions.tsv` -- \
 statement, exact source citation (file, and sheet, row or section), the alternative reading considered, and why \
 this one was chosen. Write each deliverable exactly where and in the format the task \
-asks, then open it again to check it. An archive holds its files at its top level unless the task says \
+asks, then open it again to check it. Make Office files with their libraries (python-docx, openpyxl, python-pptx) \
+or LibreOffice (`soffice --headless --convert-to`), never by assembling the archive by hand or saving text under \
+the extension; check what the container has (`python3 -c 'import docx'`, `which soffice`) before deciding a \
+format cannot be made. An archive holds its files at its top level unless the task says \
 otherwise: build it from inside the folder (`cd dir && zip out.zip a b`), never from an absolute path, and list \
 its entries to check. When you are done, reply without calling a tool: a short summary of each \
 deliverable, where it is, and the key results."""
@@ -922,33 +983,40 @@ def named_files(task):
 
 
 async def missing_files(session, paths):
-  """Lists which of `paths` do not exist or are empty in the task container.
+  """Finds which of `paths` are missing, empty, or do not open as their type.
 
-  A check that cannot run is logged and reports nothing missing, so it never
-  stops the run.
+  Runs `FILES_CHECK` in the task container; where python3 itself fails, falls
+  back to `test -s`. A check that cannot run at all is logged and reports
+  nothing wrong, so it never stops the run.
 
   Args:
     session: Active `taskbridge.Session` connected to the task container.
     paths: Absolute paths from `named_files`.
 
   Returns:
-    The missing or empty paths.
+    `{path: what is wrong}` for the paths at fault, in `paths` order.
   """
   if not paths:
-    return []
+    return {}
   quoted = " ".join(shlex.quote(p) for p in paths)
   try:
-    result = await session.exec(
-        f': ple_deliverables; for p in {quoted}; do [ -s "$p" ] ||'
-        ' printf "%s\\n" "$p"; done'
-    )
+    await session.write_file(FILES_PATH, FILES_CHECK)
+    result = await session.exec(f"python3 {FILES_PATH} {quoted}")
+    if result.get("exit_code") != 0:
+      result = await session.exec(
+          f': ple_deliverables; for p in {quoted}; do [ -s "$p" ] ||'
+          ' printf "%s\\tdoes not exist or is empty\\n" "$p"; done'
+      )
   except taskbridge.TaskError as exc:
     await session.log(
         safe(f"deliverables: check failed ({str(exc)[:200]})")
     )
-    return []
-  shown = set((result["output"] or "").splitlines())
-  return [p for p in paths if p in shown]
+    return {}
+  found = dict(
+      line.split("\t", 1) for line in (result["output"] or "").splitlines()
+      if "\t" in line
+  )
+  return {p: found[p] for p in paths if p in found}
 
 
 async def gate_run(session, script):
@@ -1278,18 +1346,17 @@ async def solve(session):
   )
   named = named_files(task)
   missing = await missing_files(session, named)
+  faults = "\n".join(f"- {p} {why}" for p, why in missing.items())
   if named:
-    gone = f"; missing {', '.join(missing)}" if missing else ""
     await session.log(safe(
         f"deliverables: {len(named) - len(missing)} of {len(named)} named"
-        f" file(s) present{gone}"
+        f" file(s) in order" + (f"; at fault:\n{faults}" if missing else "")
     ))
-  # one push for files the worker says it wrote but did not
+  # one push for files the worker says it wrote but did not, or wrote in a
+  # form that does not open
   if missing and time_for(until(CHECK_SHARE / 2)):
     await session.log("deliverables: asking the worker to write them")
-    work.append(
-        {"role": "user", "content": MISSING.format(files="\n".join(missing))}
-    )
+    work.append({"role": "user", "content": MISSING.format(files=faults)})
     summary = (
         await agent(
             session, work, TOOLS + extra, until(CHECK_SHARE / 2), final=True
@@ -1389,11 +1456,12 @@ async def solve(session):
     finally:
       if saved:
         await guard(session, "restore")
-    # a named file that is missing fails the round whatever the check said
+    # a named file that is missing or does not open fails the round whatever
+    # the check said
     missing = await missing_files(session, named)
     if missing:
       gaps = "\n".join(
-          f"FAIL DELIVERABLE: {p} does not exist or is empty" for p in missing
+          f"FAIL DELIVERABLE: {p} {why}" for p, why in missing.items()
       )
       verdict = (
           gaps if verdict.strip("*_. \r\n\t").upper() in ("", "PASS")
