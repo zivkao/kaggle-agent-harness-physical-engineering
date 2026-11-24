@@ -75,6 +75,12 @@
 - ④ **操作教訓（重現性）**：LiteLLM 必須綁 **0.0.0.0**——harness egress sidecar 在容器內走 `host.docker.internal:4000`→`172.17.0.1`，loopback-only 綁定讓 `model` 階段 FAIL（本次第一次 kit check 死因）；啟動需 `uv run --with "litellm[proxy]" --with websockets`（新版 litellm 純 `litellm` 缺 fastapi／websockets）；`pkill`/`pgrep -f` 的模式會命中工具 wrapper 自己的 command line（兩度 exit 144 自我終止）→ 啟停改放腳本 `/tmp/start_litellm.sh`（模式只存在腳本內）。
 - ⑤ **P2 正式開工**（使用者指示「依 progress.md 逐項完成，主要目標進入第二階段」）：P2-01～P2-04 已補上可重現證據（見 §3）；P2-05 四領域已 2/4（structural×2）→ 補 **EXP-018 `engineers-estimate-check`（電機, light L1, MCP×8）**＝新 gate 碼首戰＋main 路徑 MCP 實戰、**EXP-019 `emergency-spillway-check`（水資源, light L1, MCP×8）**排隊（串行，發射前另立 `.start`）。
 
+**2026-11-24（五十一）— 「推理吃光輸出額度」查明是 harness 的回覆預算太小，已修（未 live 驗證）：**
+- ① **證據（Ollama `server.log` 的 slot 紀錄）**：EXP-031 在學到視窗（`learned 65534`）之前，回覆實際用了 3.5K–11.6K token；學到之後，fix 輪的 prompt 已有 54.2K–54.8K，回覆預算＝65,536 − 8,000 margin − 對話 ≈ **2.7K–3.6K**，每個回覆都剛好在預算處停下（例：54,761 → 生成 2,786），全是推理 → 9 次 `reply cut off before any answer`。每次「Answer now」推回都讓對話再長一點，下一次預算更小；第 3 次後該步驟以空回覆結束（fix 2 就是這樣收尾）。
+- ② **原因**：舊碼只在剩餘空間 < `CTX_MIN_ANSWER`（1,024）時才剪舊工具結果，2.7K 的空間不觸發；對會先推理的模型這個下限太低。
+- ③ **修正**：`ANSWER_SHARE = 8`——視窗已知時，送出前先剪舊工具結果，直到回覆至少有視窗的 1/8（64K 下 8K），log `context budget: N tokens left for the reply, under M`；同一步驟只要有回覆因預算被截，下限加倍到 1/4（16K）。mock `answer_room`（在 `da9c75d` 失敗），33/33；pyflakes 0；長行 48。代價：對話更早被剪，模型可能要重讀檔案。
+- ④ **待 live**：重跑一題長對話題（如 fire-solve）看 `reply cut off before any answer` 是否消失、`tokens left for the reply` 觸發次數。
+
 **2026-11-24（五十）— EXP-031（`4a0ff75`）fire-solve-convergence＝0.078：這題第一次交出評分端讀得到的 docx：**
 - ① **kit check 23**：7/7 PASS（`kitcheck23_gemma.log`、映像 `dff5e2ffac0dc5e4`）。
 - ② **結果**：**0.078／`ok`**（10／129 加權分）／2,097 s、52 req、in 1.90M／out 114,272；評分端 `1 vendor rendering text(s) + final message`＝檔案讀得到。對照：EXP-029 未寫檔、EXP-030 手拼壞 docx，兩次都是 NOT DELIVERED。
