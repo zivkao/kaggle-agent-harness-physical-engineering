@@ -346,7 +346,8 @@ GATE = """You turn an engineering task into a mechanical acceptance check that r
 delivery is accepted. The task and a plan follow; an engineer has already produced the files. Open the \
 deliverables with your tools (bash starts in {workdir}), but do not create or change any file under the \
 task folders (scratch files may live in /tmp). Reply with a single Python 3 script in one fenced code \
-block and nothing else. The script runs as `python3` inside the task container: it may read any task \
+block and nothing else. The script runs as `python3` from {workdir}, not from a task folder, so it \
+names every file by its absolute path (the task's own paths where it gives them). It may read any task \
 file, write only under /tmp, import only the standard library and modules you have checked import there \
 (`python3 -c 'import openpyxl'`), prints one line per hard requirement the task states -- `PASS <id>` when it \
 holds, `FAIL <id>: <what is wrong, and in which file and row>` when it does not -- cheapest checks first, \
@@ -1310,8 +1311,15 @@ async def solve(session):
     saved = await guard(session, "save")
     try:
       if check_script is None and time_for(until(CHECK_SHARE / 4)):
+        # EXP-029: seven gate scripts looked for `output/submission.zip`
+        # relative to the workdir, reported a delivered zip missing, and sent
+        # both fix rounds after it
+        paths = "\n".join(named)
         gating = conversation(
-            GATE, session, f"## Task\n{task}\n\n## Plan\n{plan}"
+            GATE, session,
+            f"## Task\n{task}\n\n## Plan\n{plan}"
+            + (f"\n\n## Files the task names (absolute)\n{paths}" if named
+               else ""),
         )
         reply = await agent(
             session, gating, READ_ONLY + extra, until(CHECK_SHARE / 2)

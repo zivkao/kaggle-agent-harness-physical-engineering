@@ -142,6 +142,9 @@ class MockModel(BaseHTTPRequestHandler):
         )
       return {"role": "assistant", "content": "summary: /app/out.txt written"}
     if role == "gate":
+      first = str(messages[1].get("content", "")) if len(messages) > 1 else ""
+      if "names (absolute)\n/app/out.txt" in first:
+        MockModel.flags["gate_paths"] = True  # the named paths reached it
       if "No module named 'pandas'" in last:  # the runtime repair turn
         MockModel.flags["saw_run_repair"] = True
       if case == "gate_fallback":  # prose instead of a script
@@ -601,6 +604,7 @@ async def main():
   ev, _ = await run_case("clean", {"MOCK_CASE": "clean"}, {})
   assert ev.guards == ["save", "restore"], f"clean: guard calls {ev.guards}"
   assert ev.named == ["", ""], f"clean: named-file checks {ev.named}"
+  assert MockModel.flags.get("gate_paths"), "clean: gate not given the paths"
   check(ev, log_in=("phase: plan", "phase: work", "phase: gate 1",
                     "gate: script ready", "verdict: PASS",
                     "deliverables: 1 of 1 named file(s) present"),
