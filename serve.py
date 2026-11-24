@@ -258,6 +258,9 @@ GATE_PATH = "/tmp/ple_gate.py"
 GATE_MAX_FAILS = 30
 GATE_GAP_CHARS = 4000
 GATE_SCRIPT_CHARS = 60_000
+# gap lines sent to every fix round even when unchanged: a named deliverable
+# still missing or broken
+KEEP_SENDING = ("FAIL DELIVERABLE",)
 # The check roles (gate, its script, verifier) must not change the
 # deliverables, but their tools can (EXP-026 #3: the gate script ran
 # `zip -u` and added duplicates to submission.zip; EXP-028 #1: the gate
@@ -433,7 +436,19 @@ file, write only under /tmp, import only the standard library and modules you ha
 holds, `FAIL <id>: <what is wrong, and in which file and row>` when it does not -- cheapest checks first, \
 and exits 0 either way. Cover every mechanically checkable requirement: each required file at its exact \
 path (inside an archive, at its exact entry path, top level unless the task says otherwise), table headers, column names and column order, value formats such as drawing-number and \
-revision-suffix rules, row and sheet ordering, required sections and counts. Recompute, never reread: \
+revision-suffix rules, row and sheet ordering, required sections and counts. Then cover every ask: break \
+the task's request into atomic asks -- each question it poses, each quantity, comparison or statement it \
+asks for, each format rule (units, decimals) -- splitting a sentence that asks several things into one \
+ask per thing, and give each its own check `Q<n>` that quotes the ask's words. A `Q` check passes only \
+when the deliverable states the specific answer -- the value with its unit and the precision the task \
+sets, the yes or no conclusion, the named item -- never because a heading or a section on the topic \
+exists. Where an ask says every, each or all, or points at a list the files hold (the conditions a basis \
+sets, the entries that differ, what a scope covers and what it does not), the script enumerates that \
+list from the source files and checks each member on its own line. Where a cited source states a \
+condition, inclusion, exclusion or limit that bears on an answer, check the deliverable says it. A check names an expected value only when the script computed it \
+that way; otherwise it checks that an answer is stated. Read Office files and PDFs as what they are, never with open() in text mode: a \
+.docx's text from `word/document.xml` (zipfile, tags stripped, table cells kept), an .xlsx through \
+openpyxl when it imports, a .pdf through `pdftotext` when present. Recompute, never reread: \
 the engineer may leave `/tmp/ple_ledger.tsv` with one row per derived figure (id, deliverable path, \
 value, source files, formula). If it exists your script must read every row and recompute each value \
 from its source files -- inputs read fresh, units converted in the code -- printing `PASS <id>` only \
@@ -1408,6 +1423,7 @@ async def solve(session):
   check_script = None
   gating = None  # the conversation that wrote check_script
   run_fixed = False  # check_script already had its runtime repair turn
+  sent = set()  # gap lines already sent to a fix round
   for round_num in range(1, MAX_FIX_ROUNDS + 1):
     if not time_for(until(CHECK_SHARE / 2)):
       break
@@ -1513,6 +1529,21 @@ async def solve(session):
         WRAP_UP_SEC
     ):
       break
+    # EXP-037: one FAIL the files already met came back word for word after
+    # a fix round, and both fix rounds went to it. A gap line a fix round left
+    # unchanged is not sent again; a missing or broken deliverable always is.
+    gaps = [line.strip() for line in verdict.splitlines() if line.strip()]
+    again = [g for g in gaps if g in sent and not g.startswith(KEEP_SENDING)]
+    if again:
+      gaps = [g for g in gaps if g not in again]
+      await session.log(safe(
+          f"verdict: {len(again)} line(s) unchanged since the last fix round,"
+          f" not sent again; {len(gaps)} left"
+      ))
+      if not gaps:
+        break
+      verdict = "\n".join(gaps)
+    sent.update(gaps)
     await session.log(f"phase: fix {round_num}")
     work.append({
         "role": "user",

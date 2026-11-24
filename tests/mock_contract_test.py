@@ -89,6 +89,8 @@ class MockModel(BaseHTTPRequestHandler):
       return self.tool("bash", {"command": "echo spin"})
     if case == "socket_close":
       return self.tool("bash", {"command": "echo spin"})
+    if "A reviewer checked" in last:  # each gap list a fix round received
+      MockModel.flags.setdefault("gaps", []).append(last)
     if role == "planner":
       if call == 1:
         return self.tool("bash", {"command": "ls"})
@@ -1007,6 +1009,39 @@ async def main():
   )
   check(ev, log_in=("phase: fix 1", "phase: gate 2"),
         log_not_in=("gate: check itself failed",), name="gate_missing_file")
+
+  # repeat_fail: a FAIL the fix round left word for word unchanged is not
+  # sent again (EXP-037: both fix rounds went to one false FAIL)
+  ev, _ = await run_case(
+      "repeat_fail", {"MOCK_CASE": "clean"},
+      {"gate_outs": ["FAIL Q6: steady solution not stated",
+                     "FAIL Q6: steady solution not stated"]},
+  )
+  check(ev, log_in=("phase: fix 1", "phase: gate 2",
+                    "1 line(s) unchanged since the last fix round, not sent"
+                    " again; 0 left"),
+        log_not_in=("phase: fix 2",), name="repeat_fail")
+
+  # repeat_part: only the new gap goes to the second fix round
+  ev, _ = await run_case(
+      "repeat_part", {"MOCK_CASE": "clean"},
+      {"gate_outs": ["FAIL g1: a", "FAIL g1: a\nFAIL g2: b"]},
+  )
+  gaps = MockModel.flags.get("gaps", [])
+  assert len(gaps) == 2 and "FAIL g2: b" in gaps[1] and (
+      "FAIL g1: a" not in gaps[1]), f"repeat_part: gap lists {gaps}"
+  check(ev, log_in=("not sent again; 1 left", "phase: fix 2"),
+        name="repeat_part")
+
+  # repeat_deliverable: a named file still missing after a fix round is
+  # sent again
+  ev, _ = await run_case(
+      "repeat_deliverable", {"MOCK_CASE": "clean"},
+      {"missing_outs": ["", "/app/out.txt\tdoes not exist\n",
+                        "/app/out.txt\tdoes not exist\n"]},
+  )
+  check(ev, log_in=("phase: fix 1", "phase: fix 2"),
+        log_not_in=("not sent again",), name="repeat_deliverable")
 
   # cancel: done must arrive within the evaluator's 10 s window
   ev, _ = await run_case("cancel", {"MOCK_CASE": "cancel"},
