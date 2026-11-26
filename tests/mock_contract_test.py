@@ -20,6 +20,7 @@ faults) plus the protocol contract:
   redaction     key inside an error body        -> key never in any log
   gate_fallback gate emits no usable script     -> reviewer takes the round
   gate_exec     check prints no verdict lines   -> reviewer takes the round
+  gate_stop     check PASSes a line, exits 1    -> repaired, not a PASS
   ctx_budget    tiny $CONTEXT_TOKENS window     -> results cut before call
   ctx_discover  window announced on /v1/models  -> budget arms itself
   ctx_learn     window unknown, size-based 400  -> learned once, then cut
@@ -154,6 +155,8 @@ class MockModel(BaseHTTPRequestHandler):
         MockModel.flags["gate_paths"] = True  # the named paths reached it
       if "No module named 'pandas'" in last:  # the runtime repair turn
         MockModel.flags["saw_run_repair"] = True
+      if "before finishing its checks" in last and "KeyError" in last:
+        MockModel.flags["saw_stop_repair"] = True
       if case == "gate_fallback":  # prose instead of a script
         return {"role": "assistant", "content": "I could not write a script"}
       if case == "gate_fence":  # the script itself checks for a fence
@@ -392,11 +395,14 @@ class Evaluator:
           else:
             outs = self.cfg.get("gate_outs") or ["PASS scripted-ok"]
             out = outs[min(self.n_gate, len(outs) - 1)]
+          exits = self.cfg.get("gate_exits") or [0]
+          code = 1 if self.cfg.get("gate_fail_exec") else (
+              exits[min(self.n_gate, len(exits) - 1)])
           self.n_gate += 1
           await ws.send(json.dumps({
               "type": "result",
               "id": message["id"],
-              "exit_code": 1 if self.cfg.get("gate_fail_exec") else 0,
+              "exit_code": code,
               "output": out,
               "truncated": False,
               "timed_out": False,
@@ -783,6 +789,35 @@ async def main():
   check(ev, log_in=("gate: script failed to run; asking for a fix",
                     "gate: fixed script ready", "verdict: PASS"),
         log_not_in=("phase: verify 1",), name="gate_crash")
+
+  # gate_stop: the script prints a PASS line, then raises and exits 1
+  # (EXP-039/040: five tasks read as PASS with the rest unchecked); the
+  # traceback goes back to the gate once and the fixed script's verdict stands
+  ev, _ = await run_case(
+      "gate_stop",{"MOCK_CASE": "clean"},
+      {"gate_outs": ["PASS Q1: files present\nTraceback (most recent call"
+                     " last):\n  File \"/tmp/ple_gate.py\", line 9, in"
+                     " <module>\nKeyError: 'PLANT'",
+                     "PASS scripted-ok"],
+       "gate_exits": [1, 0]},
+  )
+  assert MockModel.flags.get("saw_stop_repair"), "gate_stop: no repair turn"
+  check(ev, log_in=("gate: script stopped after 1 PASS line(s) (exit 1:",
+                    "gate: script failed to run; asking for a fix",
+                    "gate: fixed script ready", "verdict: PASS"),
+        log_not_in=("phase: verify 1",), name="gate_stop")
+
+  # gate_stop_twice: the fixed script stops the same way; the reviewer takes
+  # the round instead of a PASS
+  ev, _ = await run_case(
+      "gate_stop_twice", {"MOCK_CASE": "clean"},
+      {"gate_outs": ["PASS Q1\nTraceback (most recent call last):\n"
+                     "KeyError: 'PLANT'"],
+       "gate_exits": [1]},
+  )
+  check(ev, log_in=("gate: script stopped after 1 PASS line(s)",
+                    "gate: fixed script ready", "phase: verify 1"),
+        name="gate_stop_twice")
 
   # retry_429: six 429s exhaust the SDK, recover() retries once more
   ev, _ = await run_case(

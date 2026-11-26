@@ -1074,11 +1074,12 @@ async def gate_run(session, script):
     script: Python source of the gate check.
 
   Returns:
-    `(verdict, crash)`. `verdict` is "PASS" when no printed line starts
-    with FAIL, the FAIL lines (capped to `GATE_MAX_FAILS` lines and
-    `GATE_GAP_CHARS` characters) as the gap list when some do, or None
-    when the run printed no verdict lines or a FAIL line shows the check's
-    own tooling is missing (`CHECK_BROKE`); `crash` then says what the
+    `(verdict, crash)`. `verdict` is "PASS" when the script exits 0 and
+    no printed line starts with FAIL, the FAIL lines (capped to
+    `GATE_MAX_FAILS` lines and `GATE_GAP_CHARS` characters) as the gap list
+    when some do, or None when the run printed no verdict lines, exited
+    nonzero with no FAIL line, or a FAIL line shows the check's own tooling
+    is missing (`CHECK_BROKE`); `crash` then says what the
     script printed, for the gate's repair turn ("" otherwise).
   """
   try:
@@ -1104,8 +1105,24 @@ async def gate_run(session, script):
         f" FAIL line; its last output:\n{shown}"
     )
   if not fails:
+    # EXP-039/040: five scripts printed a PASS line or two, then raised and
+    # exited 1; read as PASS, each run ended with the rest unchecked. A run
+    # that exits nonzero without a FAIL line did not finish its checks.
+    if result.get("exit_code") != 0:
+      tail = " ".join(lines[-3:])[:200]
+      await session.log(
+          safe(
+              f"gate: script stopped after {len(passes)} PASS line(s)"
+              f" (exit {result['exit_code']}: {tail})"
+          )
+      )
+      shown = "\n".join(lines[-GATE_CRASH_LINES:])[-GATE_GAP_CHARS:]
+      return None, (
+          f"it exited {result['exit_code']} after {len(passes)} PASS"
+          f" line(s), before finishing its checks; its last output:\n{shown}"
+      )
     return "PASS", ""
-  broke = [ln for ln in fails if CHECK_BROKE.search(ln)]
+  broke =[ln for ln in fails if CHECK_BROKE.search(ln)]
   if broke:
     await session.log(
         safe(f"gate: check itself failed ({broke[0][:200]})")
