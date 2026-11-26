@@ -256,7 +256,24 @@ CHECK_SHARE = 0.25
 # a check or a fix round starts only with this long to work before its own
 # wrap-up
 MIN_STEP_SEC = 120
-MAX_FIX_ROUNDS = 2
+# EXP-039/041: runs ended with FAIL lines left and over 5 h of 6 h unused
+# (two rounds spent, or every line dropped as unchanged); more rounds run
+# only while gaps remain and the time checks allow
+MAX_FIX_ROUNDS = 5
+# A gap line a fix round left unchanged is sent once more, with a note to
+# look before editing again, while more than this share of the task's time
+# is left; with less, or once sent GAP_SENDS times, it is dropped (EXP-037:
+# a FAIL the files already met took both fix rounds). $RESEND_SHARE
+# overrides it.
+RESEND_SHARE = float(os.environ.get("RESEND_SHARE", "0.5"))
+GAP_SENDS = 2
+UNCHANGED_NOTE = (
+    "\n\nYour last fix round left these lines exactly as they were:\n"
+    "{lines}\nBefore editing again, run the check yourself or open the"
+    " file to see what it actually holds, then try a different approach."
+    " If you find the file already meets the requirement, say so in your"
+    " summary."
+)
 # P3 mechanical acceptance check: where the gate script runs in the task
 # container, and how much of its output reaches the worker as gaps.
 GATE_PATH = "/tmp/ple_gate.py"
@@ -376,6 +393,27 @@ CHECK_BROKE = re.compile(
     r"No such file or directory: '[^'/]+'|command not found"
     r"|No module named|ModuleNotFoundError|NameError",
     re.I,
+)
+# A FAIL line that reads like a Python error raised inside the check itself
+# (EXP-041 heat-rejection: "Attempt to use ZIP archive that was already
+# closed" came from the script's own zip handling; the worker opened the
+# file fine, the line came back unchanged and the run ended with 5.5 h left).
+# Such a line, unchanged after a fix round, goes back to the gate once.
+CHECK_EXC = re.compile(
+    r"Traceback|\b[A-Z]\w*(?:Error|Exception)\b|already closed"
+    r"|closed file|unsupported operand|has no attribute|not subscriptable"
+    r"|is not iterable|is not callable|index out of range"
+    r"|referenced before assignment|positional argument|can only concatenate"
+    r"|not supported between instances|string indices must be|NoneType",
+)
+GATE_EXC_REPAIR = (
+    "After a fix round these FAIL lines from your script came back word for"
+    " word, and each reads like a Python error raised inside the check"
+    " rather than a fault in the files:\n{lines}\n\nOpen the files with"
+    " your tools and find where your script raises it. If the script is at"
+    " fault, fix it; if the file really is at fault, keep the check but make"
+    " its FAIL line say what in the file is wrong. Reply with the whole"
+    " corrected script in one fenced code block and nothing else."
 )
 # The endpoint key the evaluator provides. Log lines are free text the
 # graders record, so anything logged passes through `safe`, which replaces
@@ -1464,7 +1502,8 @@ async def solve(session):
   check_script = None
   gating = None  # the conversation that wrote check_script
   run_fixed = False  # check_script already had its runtime repair turn
-  sent = set()  # gap lines already sent to a fix round
+  exc_fixed = False  # the gate already had its CHECK_EXC repair turn
+  sends = {}  # gap line -> times sent to a fix round
   for round_num in range(1, MAX_FIX_ROUNDS + 1):
     if not time_for(until(CHECK_SHARE / 2)):
       break
@@ -1532,6 +1571,36 @@ async def solve(session):
         if fixed:
           check_script = fixed
           verdict, crash = await gate_run(session, check_script)
+      # one repair turn for FAIL lines that read like the script's own error
+      # and that a fix round left unchanged
+      odd = [
+          ln.strip() for ln in (verdict or "").splitlines()
+          if ln.strip() in sends and CHECK_EXC.search(ln)
+      ] if verdict != "PASS" else []
+      if (
+          odd and gating is not None and not exc_fixed
+          and time_for(until(CHECK_SHARE / 4))
+      ):
+        exc_fixed = True
+        await session.log(safe(
+            f"gate: {len(odd)} unchanged FAIL line(s) read like the script's"
+            f" own error; asking for a fix ({odd[0][:200]})"
+        ))
+        gating.append({
+            "role": "user",
+            "content": GATE_EXC_REPAIR.format(lines="\n".join(odd)),
+        })
+        reply = await agent(
+            session, gating, READ_ONLY + extra, until(CHECK_SHARE / 2)
+        )
+        fixed = gate_script(reply)
+        await session.log(
+            "gate: fixed script ready" if fixed else
+            safe(f"gate: no usable fixed script ({gate_why(reply)})")
+        )
+        if fixed:
+          check_script = fixed
+          verdict, crash = await gate_run(session, check_script)
       if verdict is None:
         if check_script is not None:
           # a check with no verdict lines, or broken tooling, is not rerun
@@ -1570,29 +1639,40 @@ async def solve(session):
         WRAP_UP_SEC
     ):
       break
-    # EXP-037: one FAIL the files already met came back word for word after
-    # a fix round, and both fix rounds went to it. A gap line a fix round left
-    # unchanged is not sent again; a missing or broken deliverable always is.
+    # A gap line a fix round left unchanged is sent once more, with a note,
+    # while over RESEND_SHARE of the time is left, then dropped (EXP-037 vs
+    # EXP-039/041); a missing or broken deliverable is always sent.
     gaps = [line.strip() for line in verdict.splitlines() if line.strip()]
-    again = [g for g in gaps if g in sent and not g.startswith(KEEP_SENDING)]
-    if again:
-      gaps = [g for g in gaps if g not in again]
+    again = [g for g in gaps if g in sends and not g.startswith(KEEP_SENDING)]
+    left = session.time_left()
+    plenty = left is None or left > until(RESEND_SHARE)
+    drop = [g for g in again if sends[g] >= GAP_SENDS or not plenty]
+    resent = [g for g in again if g not in drop]
+    if drop:
+      gaps = [g for g in gaps if g not in drop]
       await session.log(safe(
-          f"verdict: {len(again)} line(s) unchanged since the last fix round,"
+          f"verdict: {len(drop)} line(s) unchanged since the last fix round,"
           f" not sent again; {len(gaps)} left"
       ))
       if not gaps:
         break
-      verdict = "\n".join(gaps)
-    sent.update(gaps)
+    if resent:
+      await session.log(safe(
+          f"verdict: {len(resent)} line(s) unchanged since the last fix"
+          " round, sent once more with a note"
+      ))
+    verdict = "\n".join(gaps)
+    for g in gaps:
+      sends[g] = sends.get(g, 0) + 1
     await session.log(f"phase: fix {round_num}")
+    note = UNCHANGED_NOTE.format(lines="\n".join(resent)) if resent else ""
     work.append({
         "role": "user",
         "content": (
             "A reviewer checked your files and found these"
-            f" gaps:\n{verdict}\n\nClose every gap by writing or editing"
-            " the files with your tools -- rereading alone fixes nothing"
-            " -- then reply with your updated summary."
+            f" gaps:\n{verdict}{note}\n\nClose every gap by writing or"
+            " editing the files with your tools -- rereading alone fixes"
+            " nothing -- then reply with your updated summary."
         ),
     })
     summary = (

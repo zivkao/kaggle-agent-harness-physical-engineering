@@ -21,6 +21,8 @@ faults) plus the protocol contract:
   gate_fallback gate emits no usable script     -> reviewer takes the round
   gate_exec     check prints no verdict lines   -> reviewer takes the round
   gate_stop     check PASSes a line, exits 1    -> repaired, not a PASS
+  gate_exc      script's own error, unchanged   -> gate repairs, PASS
+  repeat_fail   FAIL unchanged by a fix round   -> resent once, then dropped
   ctx_budget    tiny $CONTEXT_TOKENS window     -> results cut before call
   ctx_discover  window announced on /v1/models  -> budget arms itself
   ctx_learn     window unknown, size-based 400  -> learned once, then cut
@@ -157,6 +159,8 @@ class MockModel(BaseHTTPRequestHandler):
         MockModel.flags["saw_run_repair"] = True
       if "before finishing its checks" in last and "KeyError" in last:
         MockModel.flags["saw_stop_repair"] = True
+      if "reads like a Python error" in last and "already closed" in last:
+        MockModel.flags["saw_exc_repair"] = True
       if case == "gate_fallback":  # prose instead of a script
         return {"role": "assistant", "content": "I could not write a script"}
       if case == "gate_fence":  # the script itself checks for a fence
@@ -1063,21 +1067,65 @@ async def main():
   check(ev, log_in=("phase: fix 1", "phase: gate 2"),
         log_not_in=("gate: check itself failed",), name="gate_missing_file")
 
-  # repeat_fail: a FAIL the fix round left word for word unchanged is not
-  # sent again (EXP-037: both fix rounds went to one false FAIL)
+  # repeat_fail: with most of the time left, a FAIL the fix round left word
+  # for word unchanged is sent once more with a note (EXP-039/041: runs
+  # ended with gaps and 5 h unused), then dropped (EXP-037: a false FAIL)
   ev, _ = await run_case(
       "repeat_fail", {"MOCK_CASE": "clean"},
-      {"gate_outs": ["FAIL Q6: steady solution not stated",
-                     "FAIL Q6: steady solution not stated"]},
+      {"gate_outs": ["FAIL Q6: steady solution not stated"]},
   )
+  gaps = MockModel.flags.get("gaps", [])
+  assert len(gaps) == 2 and "left these lines exactly as they were" in (
+      gaps[1]) and "exactly as" not in gaps[0], f"repeat_fail: {gaps}"
   check(ev, log_in=("phase: fix 1", "phase: gate 2",
+                    "1 line(s) unchanged since the last fix round, sent once"
+                    " more with a note", "phase: fix 2", "phase: gate 3",
                     "1 line(s) unchanged since the last fix round, not sent"
                     " again; 0 left"),
-        log_not_in=("phase: fix 2",), name="repeat_fail")
+        log_not_in=("phase: fix 3", "own error"), name="repeat_fail")
 
-  # repeat_part: only the new gap goes to the second fix round
+  # repeat_late: with less than $RESEND_SHARE of the time left, an
+  # unchanged FAIL is dropped at once
   ev, _ = await run_case(
-      "repeat_part", {"MOCK_CASE": "clean"},
+      "repeat_late", {"MOCK_CASE": "clean", "RESEND_SHARE": "1.01"},
+      {"gate_outs": ["FAIL Q6: steady solution not stated"]},
+  )
+  check(ev, log_in=("phase: fix 1", "phase: gate 2",
+                    "not sent again; 0 left"),
+        log_not_in=("phase: fix 2", "sent once more"), name="repeat_late")
+
+  # gate_exc: a FAIL line that reads like the script's own error and that a
+  # fix round left unchanged (EXP-041 heat-rejection) goes back to the gate
+  # once; the fixed script's verdict stands
+  exc = ("FAIL Q3: CUP.xlsx: error processing file: Attempt to use ZIP"
+         " archive that was already closed")
+  ev, _ = await run_case(
+      "gate_exc", {"MOCK_CASE": "clean"},
+      {"gate_outs": [f"PASS Q1\n{exc}", f"PASS Q1\n{exc}",
+                     "PASS scripted-ok"]},
+  )
+  assert MockModel.flags.get("saw_exc_repair"), "gate_exc: no repair turn"
+  check(ev, log_in=("phase: fix 1", "phase: gate 2",
+                    "1 unchanged FAIL line(s) read like the script's own"
+                    " error; asking for a fix", "gate: fixed script ready",
+                    "verdict: PASS"),
+        log_not_in=("phase: fix 2", "phase: verify"), name="gate_exc")
+
+  # gate_exc_new: the same kind of line seen for the first time is a gap for
+  # the worker (EXP-041 lv-cable-sizing: the fix round cleared it)
+  ev, _ = await run_case(
+      "gate_exc_new", {"MOCK_CASE": "clean"},
+      {"gate_outs": ["FAIL R4: calc_book.xlsx error: unsupported operand"
+                     " type(s) for +=: 'float' and 'str'",
+                     "PASS scripted-ok"]},
+  )
+  check(ev, log_in=("phase: fix 1", "phase: gate 2", "verdict: PASS"),
+        log_not_in=("own error",), name="gate_exc_new")
+
+  # repeat_part: late in the run, only the new gap goes to the second fix
+  # round
+  ev, _ = await run_case(
+      "repeat_part", {"MOCK_CASE": "clean", "RESEND_SHARE": "1.01"},
       {"gate_outs": ["FAIL g1: a", "FAIL g1: a\nFAIL g2: b"]},
   )
   gaps = MockModel.flags.get("gaps", [])
