@@ -45,6 +45,7 @@ import json
 import os
 import re
 import shlex
+import time
 
 import openai
 import taskbridge
@@ -60,6 +61,10 @@ EFFORT = os.environ.get("REASONING_EFFORT") or (
 # a fix round wraps up this long before the time limit, and a wrap-up call may
 # take as long
 WRAP_UP_SEC = 240
+# A model call with no reply after this long is stopped and sent again: the
+# evaluation server drops a call silent for 1800 s, and EXP-039's longest
+# answered call (3,881 calls) took 663 s. $CALL_TIMEOUT_SEC overrides it.
+CALL_TIMEOUT_SEC = float(os.environ.get("CALL_TIMEOUT_SEC", "1200"))
 WRAP_UP = {
     "role": "user",
     "content": "Time is up for this step. Stop and reply with your answer.",
@@ -1194,12 +1199,15 @@ async def agent(session, messages, tools, until, final=False):
     # A call still running when the wrap-up starts is stopped. The wrap-up call
     # itself gets at most WRAP_UP_SEC and stops at the time limit; if it takes
     # longer, the step returns head, its answer so far.
-    if left is None:
-      timeout = None
-    elif wrap_up:
+    # Any other call stops after CALL_TIMEOUT_SEC with no reply and is sent
+    # again (`capped`).
+    if wrap_up:
       timeout = min(WRAP_UP_SEC, left)
+    elif left is None or left - until > CALL_TIMEOUT_SEC:
+      timeout = CALL_TIMEOUT_SEC
     else:
       timeout = left - until
+    capped = not wrap_up and timeout == CALL_TIMEOUT_SEC
     # DEF-003: with a known window ($CONTEXT_TOKENS or the endpoint's
     # announced one), trim old tool results before sending so the
     # conversation plus its reply budget fits; the reply budget itself
@@ -1236,6 +1244,9 @@ async def agent(session, messages, tools, until, final=False):
           min(MAX_OUTPUT_TOKENS, CONTEXT_TOKENS // OUT_SHARE, room),
       )
     sent = est_tokens(messages)
+    # stderr (serve.log) keeps these even if the evaluator's socket is lost
+    started = time.monotonic()
+    taskbridge.trace(f"model call: ~{sent} tokens, up to {timeout:.0f} s")
     try:
       reply = await asyncio.wait_for(
           client.chat.completions.create(
@@ -1249,13 +1260,26 @@ async def agent(session, messages, tools, until, final=False):
           timeout,
       )
     except asyncio.TimeoutError:
+      took = time.monotonic() - started
+      taskbridge.trace(f"model call: no reply in {took:.0f} s")
       if wrap_up:
         return head
+      if capped:
+        await session.log(
+            f"model call: no reply in {took:.0f} s; sending it again"
+        )
       continue
     except openai.APIError as exc:
+      took = time.monotonic() - started
+      taskbridge.trace(
+          f"model call: {type(exc).__name__} after {took:.0f} s"
+      )
       if await recover(session, messages, exc, waits, until):
         continue
       raise
+    taskbridge.trace(
+        f"model call: answered in {time.monotonic() - started:.0f} s"
+    )
     waits = iter(RETRY_WAITS)
     if reply.usage:
       details = getattr(reply.usage, "prompt_tokens_details", None)

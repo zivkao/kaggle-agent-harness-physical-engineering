@@ -35,6 +35,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -257,6 +258,13 @@ class MockModel(BaseHTTPRequestHandler):
       self.end_headers()
       self.wfile.write(body)
       return
+    # $MOCK_HANG_AT: that response number gets no reply for $MOCK_HANG_SEC,
+    # then the socket closes without one (a server that never started on it)
+    if MockModel.n == int(os.environ.get("MOCK_HANG_AT", "0")):
+      MockModel.flags["hung"] = MockModel.flags.get("hung", 0) + 1
+      time.sleep(float(os.environ.get("MOCK_HANG_SEC", "10")))
+      self.close_connection = True
+      return
     delay = float(os.environ.get("MOCK_DELAY", "0"))
     if delay:
       time.sleep(delay)
@@ -460,6 +468,7 @@ async def run_case(name, env_add, cfg, api_key="mock-test-key"):
       "MOCK_CASE", "MOCK_FAIL_FROM", "MOCK_FAIL_TO", "MOCK_FAIL_STATUS",
       "MOCK_FAIL_BODY", "MOCK_DELAY", "MOCK_WINDOW", "MOCK_CTX_LIMIT",
       "MOCK_CTX_TRUNC", "MOCK_TOKEN_RATIO", "MOCK_REASONING",
+      "MOCK_HANG_AT", "MOCK_HANG_SEC",
   ):
     if key in env_add:
       os.environ[key] = str(env_add[key])
@@ -477,13 +486,22 @@ async def run_case(name, env_add, cfg, api_key="mock-test-key"):
       **{k: str(v) for k, v in env_add.items()},
   )
   env.pop("REASONING_EFFORT", None)
+  # serve.py's stderr (serve.log in a real run), kept for the traces
+  err = tempfile.TemporaryFile()
   proc = subprocess.Popen(
-      [sys.executable, "serve.py"], env=env, cwd=os.getcwd()
+      [sys.executable, "serve.py"], env=env, cwd=os.getcwd(), stderr=err
   )
   try:
-    return await _drive(name, cfg, s_port), proc
+    ev = await _drive(name, cfg, s_port)
+    await asyncio.sleep(0.5)  # lets the session's last stderr lines land
+    err.seek(0)
+    ev.stderr = err.read().decode(errors="replace")
+    sys.stderr.write(ev.stderr)  # still shown, as before
+    return ev, proc
   finally:
     proc.terminate()
+    proc.wait()
+    err.close()
     server.shutdown()
 
 
@@ -1051,7 +1069,28 @@ async def main():
   # socket_close: a dropped socket ends the task but not the server
   ev, _ = await run_case("socket_close", {"MOCK_CASE": "socket_close"},
                          {"close_after_execs": 2})
+  # no log frame can reach an evaluator that left; stderr (serve.log) still
+  # records how the session ended
+  for line in ("taskbridge: the evaluator closed the connection",
+               "taskbridge: session ended (cancelled"):
+    assert line in ev.stderr, f"socket_close: no {line!r} on stderr"
   print("[PASS] socket_close: server accepted the rerun")
+
+  # call_stall: the first model call gets no reply (EXP-039 heat-rejection,
+  # where one silent call stopped the task for hours); after
+  # $CALL_TIMEOUT_SEC it is sent again and the run completes
+  ev, _ = await run_case(
+      "call_stall",
+      {"MOCK_CASE": "clean", "MOCK_HANG_AT": 1, "MOCK_HANG_SEC": 10,
+       "CALL_TIMEOUT_SEC": 2},
+      {},
+  )
+  assert MockModel.flags.get("hung") == 1, "call_stall: no call was held"
+  for line in ("taskbridge: task received", "model call: no reply in 2 s",
+               "model call: answered in", "taskbridge: session ended (done)"):
+    assert line in ev.stderr, f"call_stall: no {line!r} on stderr"
+  check(ev, log_in=("model call: no reply in 2 s; sending it again",),
+        max_secs=30, name="call_stall")
 
   # redaction: a key echoed in an error body must never reach a log frame
   ev, _ = await run_case(

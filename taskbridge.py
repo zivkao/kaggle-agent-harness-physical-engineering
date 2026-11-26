@@ -72,6 +72,22 @@ MAX_HEAD = 64 << 10  # the Relay's limit on a request line and headers
 MAX_BODY = 64 << 20
 
 
+def trace(text: str) -> None:
+  """Writes one timestamped line to stderr.
+
+  Unlike `Session.log`, which travels over the evaluator's WebSocket, stderr
+  is kept even when that connection is lost, so it records how a session ended.
+
+  Args:
+    text: The line to write (no secrets).
+  """
+  print(
+      f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {text}",
+      file=sys.stderr,
+      flush=True,
+  )
+
+
 class Cancelled(Exception):  # pylint: disable=g-bad-exception-name
   """Raised when the evaluator cancels the task or closes the connection."""
 
@@ -159,9 +175,17 @@ class Session:
           if not future.done():
             future.set_result(msg)
         elif msg.get("type") == "cancel":
+          reason = str(msg.get("reason"))[:100]
+          trace(f"taskbridge: cancel received ({reason})")
           break
-    except ConnectionClosed:
-      pass
+      else:
+        code = getattr(self.ws, "close_code", None)
+        why = getattr(self.ws, "close_reason", None)
+        trace(
+            f"taskbridge: the evaluator closed the connection ({code} {why!r})"
+        )
+    except ConnectionClosed as exc:
+      trace(f"taskbridge: the connection was lost ({exc})")
     # Logged here; waiting requests are released in the finally block below.
     except Exception as exc:  # pylint: disable=broad-exception-caught
       print(
@@ -573,6 +597,9 @@ async def _session(ws: Any, handler: Any) -> None:
       )
     return
   session = Session(ws, task)
+  limit = session.limits.get("agent_timeout_sec")
+  trace(f"taskbridge: task received (time limit {limit} s)")
+  ended = "unknown"  # how the session ended, for stderr
   reader = asyncio.create_task(
       session._read()  # pylint: disable=protected-access
   )
@@ -586,6 +613,11 @@ async def _session(ws: Any, handler: Any) -> None:
         work.exception()
         if work in done and not work.cancelled()
         else Cancelled()
+    )
+    ended = (
+        "done" if exc is None
+        else "cancelled" if isinstance(exc, Cancelled)
+        else f"error: {type(exc).__name__}"
     )
     if exc is None:
       answer = work.result()
@@ -640,8 +672,9 @@ async def _session(ws: Any, handler: Any) -> None:
           "final_message": _final(final or "(stopped: time is up)"),
       })
   except ConnectionClosed:
-    pass
+    ended += ", its last message not sent: the connection was closed"
   finally:
+    trace(f"taskbridge: session ended ({ended})")
     for t in (work, stop, reader):
       t.cancel()
 
