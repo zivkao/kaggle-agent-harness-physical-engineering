@@ -685,6 +685,17 @@ def files_unit():
     open(p("good.pdf"), "wb").write(b"%PDF-1.7\n%%EOF\n")
     with zipfile.ZipFile(p("good.zip"), "w") as z:
       z.writestr("a.csv", "x,y\n")
+    dxf = "  0\nSECTION\n  2\nENTITIES\n  0\nENDSEC\n  0\nEOF\n"
+    open(p("good.dxf"), "w").write(dxf)
+    open(p("text.dxf"), "w").write("plan drawing, plain text")
+    open(p("bad.json"), "w").write("{'sfrs': 1,}")
+    with zipfile.ZipFile(p("good_set.zip"), "w") as z:  # EXP-043 seismic
+      z.writestr("plan.dxf", dxf)
+      z.writestr("record.json", '{"sfrs": "W1"}')
+    with zipfile.ZipFile(p("bad_set.zip"), "w") as z:
+      z.writestr("plan.dxf", "plan drawing, plain text")
+      z.writestr("record.json", "{'sfrs': 1,}")
+      z.writestr("notes.txt", "not opened")
     with zipfile.ZipFile(p("noparts.docx"), "w") as z:
       z.writestr("readme.txt", "hi")
     with zipfile.ZipFile(p("broken.docx"), "w") as z:  # as EXP-030 #1 built
@@ -695,7 +706,8 @@ def files_unit():
       z.writestr("_rels/.rels", "<Relationships/>")
       z.writestr("word/document.xml", "<w:document/>")
     names = ["none.docx", "empty.pdf", "text.docx", "fake.pdf", "good.pdf",
-             "good.zip", "noparts.docx", "broken.docx"]
+             "good.zip", "noparts.docx", "broken.docx", "good.dxf",
+             "text.dxf", "bad.json", "good_set.zip", "bad_set.zip"]
     if has_docx:
       import docx
       d = docx.Document()
@@ -711,7 +723,9 @@ def files_unit():
     got = {os.path.basename(k): v for k, v in got.items()}
     want = {"none.docx": "does not exist", "empty.pdf": "is empty",
             "text.docx": "not a zip archive", "fake.pdf": "no %PDF header",
-            "noparts.docx": "no word/document.xml"}
+            "noparts.docx": "no word/document.xml",
+            "text.dxf": ".dxf", "bad.json": "does not open as .json",
+            "bad_set.zip": "holds plan.dxf, which"}
     if has_docx:
       want["broken.docx"] = "does not open as .docx"
     for name, needle in want.items():

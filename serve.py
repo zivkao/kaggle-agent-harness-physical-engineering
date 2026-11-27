@@ -207,7 +207,28 @@ def opened(path, ext):
     elif ext == ".pptx":
         import pptx
         pptx.Presentation(path)
-def why(path):
+    elif ext == ".dxf":
+        import ezdxf
+        ezdxf.readfile(path)
+# files inside a delivered zip that are opened as their type too (EXP-043
+# seismic: the DXF in submission.zip did not parse, "Invalid DXF attribute
+# 'paperspace' for entity LAYER", and the task scored 0)
+MEMBER = tuple(PART) + (".pdf", ".dxf", ".json")
+def members(path, z):
+    import tempfile
+    faults = []
+    for i in z.infolist():
+        ext = os.path.splitext(i.filename)[1].lower()
+        if i.is_dir() or ext not in MEMBER or i.file_size > (50 << 20):
+            continue
+        with tempfile.NamedTemporaryFile(suffix=ext) as tmp:
+            tmp.write(z.read(i))
+            tmp.flush()
+            wrong = why(tmp.name, inner=True)
+        if wrong:
+            faults.append("holds %s, which %s" % (i.filename, wrong))
+    return "; ".join(faults[:3])
+def why(path, inner=False):
     if not os.path.isfile(path):
         return "does not exist"
     if os.path.getsize(path) == 0:
@@ -218,6 +239,10 @@ def why(path):
             with zipfile.ZipFile(path) as z:
                 bad = z.testzip()
                 names = set(z.namelist())
+                if not bad and ext == ".zip" and not inner:
+                    inside = members(path, z)
+                    if inside:
+                        return inside
             if bad:
                 return "has a corrupt archive entry: " + bad
             if ext in PART:
@@ -232,6 +257,18 @@ def why(path):
             with open(path, "rb") as f:
                 if not f.read(5).startswith(b"%PDF"):
                     return "is not a PDF (no %PDF header)"
+        elif ext == ".dxf":
+            try:
+                opened(path, ext)
+            except ImportError:
+                with open(path, "rb") as f:
+                    head = f.read(200)
+                if b"SECTION" not in head and b"AutoCAD Binary DXF" not in head:
+                    return "is not a .dxf file (no SECTION at the start)"
+        elif ext == ".json":
+            import json
+            with open(path, "rb") as f:
+                json.loads(f.read().decode("utf-8-sig"))
     except zipfile.BadZipFile:
         return "is not a %s file (not a zip archive)" % ext
     except Exception as exc:
