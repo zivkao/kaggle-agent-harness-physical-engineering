@@ -328,6 +328,7 @@ class Evaluator:
     self.execs = []
     self.n_execs = 0
     self.n_gate = 0  # mechanical-check runs (own counter, see below)
+    self.n_tmpl = 0  # template comparisons (own counter)
     self.guards = []  # check-guard commands (save / restore), not counted
     self.named = []  # named-file checks and what each reported missing
 
@@ -382,6 +383,21 @@ class Evaluator:
           outs = self.cfg.get("missing_outs") or [""]
           out = outs[min(len(self.named), len(outs) - 1)]
           self.named.append(out)
+          await ws.send(json.dumps({
+              "type": "result",
+              "id": message["id"],
+              "exit_code": 0,
+              "output": out,
+              "truncated": False,
+              "timed_out": False,
+          }))
+          continue
+        if "ple_templates" in cmd:
+          # the template comparison runs outside the counters too; scripted
+          # per call from $template_outs (default: no templates)
+          outs = self.cfg.get("template_outs") or ["#templates 0 matched 0"]
+          out = outs[min(self.n_tmpl, len(outs) - 1)]
+          self.n_tmpl += 1
           await ws.send(json.dumps({
               "type": "result",
               "id": message["id"],
@@ -708,9 +724,96 @@ def files_unit():
     shutil.rmtree(tmp)
 
 
+def templates_unit():
+  """Runs serve.py's TEMPLATE_CHECK for real on a scratch task folder.
+
+  Templates under `templates/` (JSON, CSV, DXF, and an .xlsx where openpyxl
+  imports) are compared with deliverables of the same name in `output/` and
+  inside `output/submission.zip` (EXP-039..042 seismic: design_record.json
+  lacked five template keys); a matching deliverable prints nothing, and a
+  template with no deliverable of its name is skipped.
+  """
+  import ast
+  import importlib.util
+  import shutil
+  import tempfile
+  import zipfile
+
+  here = os.path.dirname(os.path.abspath(__file__))
+  tree = ast.parse(open(os.path.join(here, "..", "serve.py")).read())
+  check = next(
+      ast.literal_eval(n.value) for n in tree.body
+      if isinstance(n, ast.Assign)
+      and getattr(n.targets[0], "id", "") == "TEMPLATE_CHECK"
+  )
+  has_xl = importlib.util.find_spec("openpyxl") is not None
+  tmp = tempfile.mkdtemp()
+  try:
+    task = os.path.join(tmp, "task")
+    os.makedirs(os.path.join(task, "templates"))
+    os.makedirs(os.path.join(task, "output"))
+    os.makedirs(os.path.join(task, "50_cost"))
+    w = lambda rel, data: open(os.path.join(task, rel), "w").write(data)  # noqa: E731
+    w("templates/design_record.json", json.dumps(
+        {"sfrs": "<key>", "seismic_basis": {"sds": None, "R": None},
+         "piers": [{"id": "<id>", "length": None}], "<example>": 1}))
+    w("templates/schedule_TEMPLATE.csv", "circuit,from,to,size\n")
+    dxf = lambda names, used=(): "".join(  # noqa: E731
+        f"  0\nLAYER\n  2\n{n}\n 70\n0\n" for n in names) + "".join(
+        f"  0\nLINE\n  8\n{n}\n" for n in used) + "  0\nEOF\n"
+    w("templates/plan_template.dxf",
+      "  0\nSECTION\n  2\nTABLES\n" + dxf(["0", "CHORD", "COLLECTOR"]))
+    w("50_cost/Estimate_Template.csv", "a,b\n")  # no deliverable by its name
+    w("output/schedule.csv", "circuit,from,to,size\nC1,A,B,4\n")  # matches
+    w("output/plan.dxf", "  0\nSECTION\n  2\nTABLES\n"
+      + dxf(["0", "CHORD"], used=["COLLECTOR"]))  # layer used, not listed
+    with zipfile.ZipFile(os.path.join(task, "output/submission.zip"), "w") as z:
+      z.writestr("design_record.json", json.dumps(
+          {"seismic_basis": {"sds": 1.0}, "piers": [{"id": "P1"}]}))
+      z.writestr("plan.dxf", dxf(["0"]))
+    want = {"design_record.json": "lacks keys sfrs, seismic_basis.R,"
+                                  " piers[0].length",
+            "submission.zip!plan.dxf": "lacks layers CHORD, COLLECTOR"}
+    if has_xl:
+      import openpyxl
+      for rel, head in (("templates/calc_TEMPLATE.xlsx",
+                         ["id", "load", "capacity"]),
+                        ("output/calc.xlsx", ["id", "capacity", "load"])):
+        wb = openpyxl.Workbook()
+        wb.active.title = "Calc" if rel.startswith("templates") else "CALC"
+        wb.active.append(["Calculation package"])  # a title row first
+        wb.active.append(head)
+        if rel.startswith("templates"):
+          wb.create_sheet("Loads").append(["case", "value"])
+          wb.create_sheet("Instructions").append(["fill in", "each row"])
+        wb.save(os.path.join(task, rel))
+      want["calc.xlsx"] = "lacks sheets Loads"
+      want["calc.xlsx#order"] = "sheet Calc headers are not in the template's"
+    script = os.path.join(tmp, "check.py")
+    open(script, "w").write(check)
+    out = subprocess.run([sys.executable, script, task], capture_output=True,
+                         text=True, check=True).stdout.splitlines()
+    head = out[0]
+    n_tmpl = 5 if has_xl else 4
+    assert head.startswith(f"#templates {n_tmpl} matched "), head
+    body = "\n".join(out[1:])
+    for loc, needle in want.items():
+      loc = loc.split("#")[0]
+      assert any(loc in ln.split("\t")[0] and needle in ln
+                 for ln in out[1:]), f"templates: {loc} lacks {needle!r}:\n{body}"
+    for good in ("schedule.csv", "Estimate", "Instructions", "lacks sheets Calc"):
+      assert good not in body, f"templates: {good} flagged:\n{body}"
+    assert "output/plan.dxf\t" not in body, f"templates: used layer missed:\n{body}"
+    print(f"[PASS] templates_unit: {len(want)} gaps found, matching files pass"
+          f"{'' if has_xl else ' (no openpyxl: .xlsx not compared)'}")
+  finally:
+    shutil.rmtree(tmp)
+
+
 async def main():
   guard_unit()
   files_unit()
+  templates_unit()
 
   # clean: the scripted full loop completes with all phase markers
   ev, _ = await run_case("clean", {"MOCK_CASE": "clean"}, {})
@@ -1133,6 +1236,22 @@ async def main():
       "FAIL g1: a" not in gaps[1]), f"repeat_part: gap lists {gaps}"
   check(ev, log_in=("not sent again; 1 left", "phase: fix 2"),
         name="repeat_part")
+
+  # template_gap: the gate's script passes but a deliverable lacks a key its
+  # template holds; the round fails on it, the fix round runs, the rerun
+  # passes
+  ev, _ = await run_case(
+      "template_gap", {"MOCK_CASE": "clean"},
+      {"template_outs": [
+          "#templates 1 matched 1\n/app/output/a.json\tlacks keys sfrs"
+          " (template /app/templates/a.json)",
+          "#templates 1 matched 1"]},
+  )
+  check(ev, log_in=("templates: 1 found, 1 deliverable(s) matched, 1 gap(s)",
+                    "verdict: FAIL TEMPLATE: /app/output/a.json lacks keys"
+                    " sfrs", "phase: fix 1", "phase: gate 2",
+                    "verdict: PASS"),
+        log_not_in=("phase: fix 2",), name="template_gap")
 
   # repeat_deliverable: a named file still missing after a fix round is
   # sent again

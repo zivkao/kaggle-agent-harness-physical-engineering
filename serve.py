@@ -243,6 +243,174 @@ for path in sys.argv[1:]:
     if wrong:
         print(path + "\t" + wrong.replace("\n", " "))
 '''
+# EXP-039..042: gate scripts passed deliverables whose structure the grader
+# could not read -- seismic's design_record.json lacked five keys its
+# template holds (scored 0 three times), mv-conveyance's gate printed one
+# `PASS ALL`. Where the task folder holds templates (a file under a
+# `template(s)` folder or named `*template*`), TEMPLATE_CHECK compares each
+# deliverable of the same name (template token dropped) under an output
+# folder or inside a zip there with its template: JSON keys, workbook sheet
+# names and header row, CSV header, DXF layers. It prints
+# `<deliverable>\t<what is missing>` per gap and, first, `#templates T
+# matched M`.
+TEMPLATE_PATH = "/tmp/ple_templates.py"
+TEMPLATE_CHECK = r'''
+import csv, io, json, os, re, sys, zipfile
+root = sys.argv[1]
+SKIP = {"node_modules", "__pycache__", "site-packages", "mcp_servers", ".git"}
+OUT = {"output", "outputs", "submission", "deliverables"}
+KINDS = (".json", ".xlsx", ".xlsm", ".csv", ".dxf")
+CAP = 50 << 20
+def target(name):
+    stem, ext = os.path.splitext(name)
+    stem = re.sub(r"(?i)[_\- ]*template[_\- ]*", "_", stem)
+    return (re.sub(r"_+", "_", stem).strip("_- ") + ext).lower()
+tmpls, outs, seen = [], [], 0
+for d, subs, names in os.walk(root):
+    subs[:] = sorted(s for s in subs if s not in SKIP and not s.startswith("."))
+    parts = [x.lower() for x in os.path.relpath(d, root).split(os.sep)]
+    in_out = any(x in OUT for x in parts)
+    in_tmpl = any(x in ("template", "templates") for x in parts)
+    for nm in sorted(names):
+        seen += 1
+        low = nm.lower()
+        p = os.path.join(d, nm)
+        if in_out:
+            if low.endswith(KINDS + (".zip",)):
+                outs.append(p)
+        elif (low.endswith(KINDS) and not low.endswith(".schema.json")
+              and (in_tmpl or "template" in low)):
+            tmpls.append(p)
+    if seen > 200000:
+        break
+def candidates(name):
+    for p in outs:
+        try:
+            if os.path.basename(p).lower() == name and os.path.getsize(p) <= CAP:
+                with open(p, "rb") as f:
+                    yield p, f.read()
+            elif p.lower().endswith(".zip"):
+                with zipfile.ZipFile(p) as z:
+                    for i in z.infolist():
+                        base = i.filename.rsplit("/", 1)[-1].lower()
+                        if base == name and i.file_size <= CAP:
+                            yield p + "!" + i.filename, z.read(i)
+        except (OSError, zipfile.BadZipFile):
+            continue
+def header(rows, want=None):
+    rows = [[str(c).strip() for c in r if c is not None and str(c).strip()]
+            for r in rows]
+    if want:  # the deliverable row holding most of the template's headers
+        best = max(rows, key=lambda r: len(set(r) & set(want)), default=[])
+        return best
+    for r in rows:
+        if len(r) >= 2:
+            return r
+    return []
+def sheets(data):
+    try:
+        import openpyxl
+    except ImportError:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            xml = z.read("xl/workbook.xml").decode("utf-8", "replace")
+        return {n: None for n in re.findall(r'<sheet\b[^>]*\bname="([^"]+)"', xml)}
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    got = {ws.title: list(ws.iter_rows(max_row=10, values_only=True))
+           for ws in wb.worksheets}
+    wb.close()
+    return got
+def layers(data, used):
+    text = data.decode("utf-8", "replace").splitlines()
+    pairs = zip(text[0::2], text[1::2])
+    found, in_layer = set(), False
+    for code, value in pairs:
+        code, value = code.strip(), value.strip()
+        if code == "0":
+            in_layer = value == "LAYER"
+        elif code == "2" and in_layer:
+            found.add(value)
+            in_layer = False
+        elif code == "8" and used:
+            found.add(value)
+    return found - {"0", "Defpoints"} if not used else found
+def keys(t, d, path, out, depth=0):
+    if isinstance(t, dict):
+        if not isinstance(d, dict):
+            out.append((path or "the top level") + " is not an object")
+            return
+        for k, v in t.items():
+            if str(k).startswith("<"):
+                continue
+            if k not in d:
+                out.append(path + str(k))
+            elif depth < 4:
+                keys(v, d[k], path + str(k) + ".", out, depth + 1)
+    elif isinstance(t, list) and t and isinstance(t[0], dict):
+        if isinstance(d, list) and d and isinstance(d[0], dict):
+            keys(t[0], d[0], path.rstrip(".") + "[0].", out, depth + 1)
+def compare(tp, data_t, data_d):
+    ext = os.path.splitext(tp)[1].lower()
+    if ext == ".json":
+        try:
+            dv = json.loads(data_d.decode("utf-8-sig"))
+        except ValueError as exc:
+            return ["does not parse as JSON (%s)" % str(exc)[:80]]
+        out = []
+        keys(json.loads(data_t.decode("utf-8-sig")), dv, "", out)
+        return ["lacks keys " + ", ".join(out[:15])] if out else []
+    if ext == ".csv":
+        th = header(list(csv.reader(io.StringIO(data_t.decode("utf-8-sig", "replace"))))[:10])
+        dh = header(list(csv.reader(io.StringIO(data_d.decode("utf-8-sig", "replace"))))[:10], th)
+        miss = [h for h in th if h not in dh]
+        return ["header lacks " + ", ".join(miss[:15])] if miss else []
+    if ext == ".dxf":
+        miss = sorted(layers(data_t, False) - layers(data_d, True))
+        return ["lacks layers " + ", ".join(miss[:15])] if miss else []
+    # sheet names match in any letter case (EXP-039 foundation-strategy
+    # scored with `Constraint Register` for `CONSTRAINT REGISTER`); a
+    # template's guidance sheet is not a deliverable sheet
+    ts = {s: r for s, r in sheets(data_t).items()
+          if not re.search(r"(?i)instruction|readme|read me|guide|how to", s)}
+    ds = {s.lower(): r for s, r in sheets(data_d).items()}
+    out = []
+    lost = [s for s in ts if s.lower() not in ds]
+    if lost:
+        out.append("lacks sheets " + ", ".join(lost[:10]))
+    for s, rows in ts.items():
+        got = ds.get(s.lower())
+        if got is None or rows is None:
+            continue
+        th = header(rows)
+        dh = header(got, th)
+        miss = [h for h in th if h not in dh]
+        if miss:
+            out.append("sheet %s header lacks %s" % (s, ", ".join(miss[:12])))
+        else:
+            common = [h for h in dh if h in th]
+            if common != [h for h in th if h in common]:
+                out.append("sheet %s headers are not in the template's order" % s)
+    return out
+matched = 0
+lines = []
+for tp in tmpls:
+    name = target(os.path.basename(tp))
+    try:
+        with open(tp, "rb") as f:
+            data_t = f.read()
+    except OSError:
+        continue
+    for loc, data_d in candidates(name):
+        matched += 1
+        try:
+            gaps = compare(tp, data_t, data_d)
+        except Exception:
+            continue  # an unreadable template or file is FILES_CHECK's job
+        for g in gaps:
+            lines.append("%s\t%s (template %s)" % (loc, g, tp))
+print("#templates %d matched %d" % (len(tmpls), matched))
+for line in lines[:30]:
+    print(line.replace("\n", " "))
+'''
 # Claude caches a prompt prefix only when marked with cache_control. Each call
 # marks the system prompt and the latest message (using 2 of Claude's 4 cache
 # breakpoints) so each turn reads the prior conversation from cache. Other
@@ -479,7 +647,9 @@ file, write only under /tmp, import only the standard library and modules you ha
 holds, `FAIL <id>: <what is wrong, and in which file and row>` when it does not -- cheapest checks first, \
 and exits 0 either way. Cover every mechanically checkable requirement: each required file at its exact \
 path (inside an archive, at its exact entry path, top level unless the task says otherwise), table headers, column names and column order, value formats such as drawing-number and \
-revision-suffix rules, row and sheet ordering, required sections and counts. Then cover every ask: break \
+revision-suffix rules, row and sheet ordering, required sections and counts; where the task gives \
+templates, every key, sheet name, header and layer the template holds, checked in the deliverable one \
+line each. Then cover every ask: break \
 the task's request into atomic asks -- each question it poses, each quantity, comparison or statement it \
 asks for, each format rule (units, decimals) -- splitting a sentence that asks several things into one \
 ask per thing, and give each its own check `Q<n>` that quotes the ask's words. A `Q` check passes only \
@@ -1104,6 +1274,43 @@ async def missing_files(session, paths):
   return {p: found[p] for p in paths if p in found}
 
 
+async def template_gaps(session):
+  """Compares the deliverables with the task's templates (`TEMPLATE_CHECK`).
+
+  A check that cannot run is logged and reports nothing, so it never stops
+  the run.
+
+  Args:
+    session: Active `taskbridge.Session` connected to the task container.
+
+  Returns:
+    `(templates, matched, gaps)`: how many templates were found, how many
+    deliverables matched one, and a `FAIL TEMPLATE: <file> <what>` line per
+    gap.
+  """
+  try:
+    await session.write_file(TEMPLATE_PATH, TEMPLATE_CHECK)
+    result = await session.exec(
+        f"python3 {TEMPLATE_PATH} {shlex.quote(session.workdir)}"
+    )
+  except taskbridge.TaskError as exc:
+    await session.log(safe(f"templates: check failed ({str(exc)[:200]})"))
+    return 0, 0, []
+  out = (result["output"] or "").splitlines()
+  head = re.match(r"#templates (\d+) matched (\d+)", out[0]) if out else None
+  if not head:
+    if result.get("exit_code") != 0:
+      await session.log(safe(
+          f"templates: check did not run ({' '.join(out[-2:])[:200]})"
+      ))
+    return 0, 0, []
+  gaps = [
+      "FAIL TEMPLATE: " + " ".join(line.split("\t", 1))
+      for line in out[1:] if "\t" in line
+  ]
+  return int(head.group(1)), int(head.group(2)), gaps
+
+
 async def gate_run(session, script):
   """Runs the gate check inside the task container and reads its verdict.
 
@@ -1624,9 +1831,18 @@ async def solve(session):
     # a named file that is missing or does not open fails the round whatever
     # the check said
     missing = await missing_files(session, named)
-    if missing:
+    # and so does a deliverable missing a key, sheet, header or layer its
+    # template holds
+    n_tmpl, n_matched, shape = await template_gaps(session)
+    if n_tmpl and round_num == 1:
+      await session.log(
+          f"templates: {n_tmpl} found, {n_matched} deliverable(s) matched,"
+          f" {len(shape)} gap(s)"
+      )
+    if missing or shape:
       gaps = "\n".join(
-          f"FAIL DELIVERABLE: {p} {why}" for p, why in missing.items()
+          [f"FAIL DELIVERABLE: {p} {why}" for p, why in missing.items()]
+          + shape
       )
       verdict = (
           gaps if verdict.strip("*_. \r\n\t").upper() in ("", "PASS")
